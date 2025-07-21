@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(./test_cleanup_git_history.sh:*)"
+    ],
+    "deny": []
+  }
+}
