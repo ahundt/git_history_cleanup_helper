@@ -1,0 +1,52 @@
+name: Test Git History Cleanup Helper
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Run tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Install git-filter-repo on Ubuntu
+      if: runner.os == 'Linux'
+      run: |
+        # Try apt first, fall back to pip if that fails
+        sudo apt-get update
+        if ! sudo apt-get install -y git-filter-repo; then
+          echo "apt install failed, trying pip..."
+          python3 -m pip install --user git-filter-repo
+          # Add ~/.local/bin to PATH for pip user installs
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        fi
+        
+    - name: Install git-filter-repo on macOS  
+      if: runner.os == 'macOS'
+      run: brew install git-filter-repo
+        
+    - name: Verify git-filter-repo installation
+      run: |
+        git-filter-repo --version
+        which git-filter-repo
+      
+    - name: Run test suite
+      run: ./test_cleanup_git_history.sh --verbose
+      
+    - name: Upload test artifacts on failure
+      uses: actions/upload-artifact@v4
+      if: failure()
+      with:
+        name: test-artifacts-${{ matrix.os }}
+        path: /tmp/git-cleanup-test.*
+        retention-days: 7
+        if-no-files-found: warn
