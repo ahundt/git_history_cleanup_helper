@@ -67,14 +67,14 @@ check_dependencies() {
 # - Detailed error messages with recovery instructions
 #
 # Edge Cases Handled:
-# ✅ Clean repository (no stash created)
-# ✅ Existing user stashes (ID-based targeting)
-# ✅ Multiple bridge stashes from failed runs (unique IDs + warnings)
-# ✅ User manually pops stash during operation (detected and skipped)
-# ✅ Stash restore conflicts (preserved with recovery steps)
-# ✅ Same repo name in different paths (absolute path keys)
-# ✅ Stash index changes during operation (search by ID)
-# ✅ Repository moved/deleted (graceful error handling)
+# - Clean repository (no stash created)
+# - Existing user stashes (ID-based targeting)
+# - Multiple bridge stashes from failed runs (unique IDs + warnings)
+# - User manually pops stash during operation (detected and skipped)
+# - Stash restore conflicts (preserved with recovery steps)
+# - Same repo name in different paths (absolute path keys)
+# - Stash index changes during operation (search by ID)
+# - Repository moved/deleted (graceful error handling)
 # ==============================================================================
 
 # Function to check for uncommitted changes
@@ -86,7 +86,8 @@ check_dependencies() {
 check_clean_working_directory() {
     local repo_path="$1"
     local operation="${2:-bridge}"  # Default to "bridge" if not specified
-    local repo_name=$(basename "$repo_path")
+    local repo_name
+    repo_name=$(basename "$repo_path")
 
     cd "$repo_path" || error_exit "Could not change directory to $repo_path. Please check the path."
 
@@ -98,7 +99,8 @@ check_clean_working_directory() {
     warn_about_orphaned_stashes "$repo_path"
 
     # Check for uncommitted or untracked work
-    local git_status=$(git status --porcelain)
+    local git_status
+    git_status=$(git status --porcelain)
     if [[ -n "$git_status" ]]; then
 
         # If auto-stash is NOT enabled, provide actionable error message and exit
@@ -150,18 +152,22 @@ check_clean_working_directory() {
         echo "" >&2
 
         # Get current branch for context
-        local current_branch=$(get_current_branch)
+        local current_branch
+        current_branch=$(get_current_branch)
 
         # Generate a short unique ID (first 8 chars of hash)
-        local unique_id=$(echo "$$-$(date +%s)-${RANDOM}" | md5sum 2>/dev/null | cut -c1-8 || echo "$$-${RANDOM}")
+        local unique_id
+        unique_id=$(echo "$$-$(date +%s)-${RANDOM}" | md5sum 2>/dev/null | cut -c1-8 || echo "$$-${RANDOM}")
 
         # Create human-readable stash message with full context
         # Format: git_commit_bridge[operation]: repo@branch (timestamp) [ID:xyz123]
-        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        local timestamp
+        timestamp=$(date '+%Y_%m_%d_%H_%M_%S')
         local stash_message="git_commit_bridge[$operation]: ${repo_name}@${current_branch} ($timestamp) [ID:${unique_id}]"
 
         # Get current stash count BEFORE creating our stash
-        local stash_count_before=$(git stash list | wc -l | tr -d ' ')
+        local stash_count_before
+        stash_count_before=$(git stash list | wc -l | tr -d ' ')
 
         # Stash both tracked changes and untracked files
         if ! git stash push --include-untracked -m "$stash_message" > /dev/null 2>&1; then
@@ -169,7 +175,8 @@ check_clean_working_directory() {
         fi
 
         # Verify the stash was created
-        local stash_count_after=$(git stash list | wc -l | tr -d ' ')
+        local stash_count_after
+        stash_count_after=$(git stash list | wc -l | tr -d ' ')
         if [ "$stash_count_after" -le "$stash_count_before" ]; then
             error_exit "Stash creation appeared to succeed but stash count did not increase. Manual intervention needed."
         fi
@@ -194,7 +201,8 @@ check_clean_working_directory() {
         echo "" >&2
 
         # Store stash information using absolute repo path to handle same-named repos in different locations
-        local repo_path_normalized=$(cd "$repo_path" && pwd)
+        local repo_path_normalized
+        repo_path_normalized=$(cd "$repo_path" && pwd)
         local repo_key="${repo_path_normalized//[^a-zA-Z0-9]/_}"
 
         eval "STASHED_${repo_key}=true"
@@ -217,7 +225,8 @@ restore_stashed_changes() {
         return 1
     fi
 
-    local repo_name=$(basename "$repo_path_normalized")
+    local repo_name
+    repo_name=$(basename "$repo_path_normalized")
     local repo_key="${repo_path_normalized//[^a-zA-Z0-9]/_}"
     local stash_flag_var="STASHED_${repo_key}"
     local stash_id_var="STASH_UNIQUE_ID_${repo_key}"
@@ -312,10 +321,12 @@ warn_about_orphaned_stashes() {
     cd "$repo_path" 2>/dev/null || return 0
 
     # Look for any stashes that match our auto-stash pattern
-    local orphaned_stashes=$(git stash list 2>/dev/null | grep "git_commit_bridge\[" || true)
+    local orphaned_stashes
+    orphaned_stashes=$(git stash list 2>/dev/null | grep "git_commit_bridge\[" || true)
 
     if [ -n "$orphaned_stashes" ]; then
-        local count=$(echo "$orphaned_stashes" | wc -l | tr -d ' ')
+        local count
+        count=$(echo "$orphaned_stashes" | wc -l | tr -d ' ')
         echo "" >&2
         echo "=======================================================" >&2
         echo "ℹ️  NOTICE: Found $count orphaned auto-stash(es) from previous runs" >&2
@@ -342,17 +353,20 @@ get_current_branch() {
 # Function to count unpushed commits (for auto-mode)
 get_unpushed_commit_count() {
     local repo_path="$1"
-    cd "$repo_path"
+    cd "$repo_path" || return 1
 
-    local current_branch=$(get_current_branch)
-    local upstream_branch=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null)
+    local current_branch
+    current_branch=$(get_current_branch)
+    local upstream_branch
+    upstream_branch=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
 
     if [ -z "$upstream_branch" ]; then
         echo "0"
         return 1
     fi
 
-    local count=$(git rev-list --count $upstream_branch..HEAD 2>/dev/null || echo "0")
+    local count
+    count=$(git rev-list --count "$upstream_branch"..HEAD 2>/dev/null || echo "0")
     echo "$count"
     return 0
 }
@@ -360,7 +374,7 @@ get_unpushed_commit_count() {
 # Function to find bridge branches (for auto-mode)
 find_bridge_branches() {
     local repo_path="$1"
-    cd "$repo_path"
+    cd "$repo_path" || return 1
 
     git fetch origin --quiet 2>/dev/null || true
     git branch -r | grep "origin/${TEMP_BRANCH_BASE}/" | sed 's/.*origin\///' | grep "${RANDOM_SUFFIX}$" || true
@@ -369,11 +383,12 @@ find_bridge_branches() {
 # Function to auto-detect operation mode
 auto_detect_mode() {
     local repo1_path="$1"
-    local repo2_path="$2"
+    local _repo2_path="$2"  # Unused but part of function signature
 
     # Check if REPO1 has bridge branches (indicates IMPORT scenario)
-    cd "$repo1_path"
-    local bridge_branches=$(find_bridge_branches "$repo1_path")
+    cd "$repo1_path" || return 1
+    local bridge_branches
+    bridge_branches=$(find_bridge_branches "$repo1_path")
 
     if [ -n "$bridge_branches" ]; then
         echo "IMPORT"
@@ -381,14 +396,15 @@ auto_detect_mode() {
     fi
 
     # Check if REPO1 has unpushed commits (indicates EXPORT scenario)
-    local unpushed=$(get_unpushed_commit_count "$repo1_path")
+    local unpushed
+    unpushed=$(get_unpushed_commit_count "$repo1_path")
     if [ "$unpushed" -gt 0 ]; then
         echo "EXPORT"
         return 0
     fi
 
     # Check if REPO1 has commits (even without upstream)
-    cd "$repo1_path"
+    cd "$repo1_path" || return 1
     if git rev-parse HEAD >/dev/null 2>&1; then
         echo "EXPORT"
         return 0
@@ -429,17 +445,20 @@ do_export() {
 
     # Check REPO 2 (The SOURCE repository) - Must be clean
     check_clean_working_directory "$repo2_src_path" "export-source"
-    local repo2_original_branch=$(get_current_branch)
+    local repo2_original_branch
+    repo2_original_branch=$(get_current_branch)
 
     # Check REPO 1 (The PUSHING/HOLDER repository)
     check_clean_working_directory "$repo1_holder_path" "export-holder"
-    local repo1_original_branch=$(get_current_branch)
+    local repo1_original_branch
+    repo1_original_branch=$(get_current_branch)
 
     echo "INFO: REPO 2 Source path: $repo2_src_path (Branch: $repo2_original_branch)"
     echo "INFO: REPO 1 Holder path: $repo1_holder_path (Branch: $repo1_original_branch)"
 
-    cd "$repo2_src_path"
-    local head_commit=$(git rev-parse HEAD)
+    cd "$repo2_src_path" || error_exit "Could not change directory to $repo2_src_path"
+    local head_commit
+    head_commit=$(git rev-parse HEAD)
 
     if [ -z "$head_commit" ]; then
         error_exit "REPO 2 ($repo2_src_path) has no commits. Cannot export."
@@ -460,14 +479,18 @@ do_export() {
     echo -e "\n1. Generating $num_commits ordered patch and metadata files..."
 
     # Get the list of the last N commit SHAs, OLDEST FIRST (--reverse)
-    local commit_list=($(git rev-list --max-count=$num_commits --abbrev-commit --reverse HEAD))
+    local commit_list=()
+    mapfile -t commit_list < <(git rev-list --max-count="$num_commits" --abbrev-commit --reverse HEAD)
     local total_generated=0
     local commit_index=1 # Start index at 1 for chronological ordering
 
     for commit_sha in "${commit_list[@]}"; do
-        local short_sha=$(echo "$commit_sha" | cut -c 1-7)
-        local parent_sha=$(git rev-parse "$commit_sha"^ 2>/dev/null)
-        local index_str=$(printf "%03d" $commit_index) # Zero-padded index (001, 002, ...)
+        local short_sha
+        short_sha=$(echo "$commit_sha" | cut -c 1-7)
+        local parent_sha
+        parent_sha=$(git rev-parse "$commit_sha"^ 2>/dev/null)
+        local index_str
+        index_str=$(printf "%03d" $commit_index) # Zero-padded index (001, 002, ...)
 
         # Determine the diff range: If it's the first commit, diff against the empty tree object.
         # This prevents issues when transferring the root commit of a repository.
@@ -486,12 +509,18 @@ do_export() {
         local json_filename="${index_str}_${TRANSFER_FILE_PREFIX}_${short_sha}.json"
 
         # Extract commit metadata using git log, then properly encode as JSON using jq
-        local commit_sha_full=$(git log -1 --pretty=format:'%H' "$commit_sha")
-        local author_name=$(git log -1 --pretty=format:'%an' "$commit_sha")
-        local author_email=$(git log -1 --pretty=format:'%ae' "$commit_sha")
-        local date_full=$(git log -1 --pretty=format:'%aI' "$commit_sha")
-        local commit_subject=$(git log -1 --pretty=format:'%s' "$commit_sha")
-        local commit_body=$(git log -1 --pretty=format:'%b' "$commit_sha")
+        local commit_sha_full
+        commit_sha_full=$(git log -1 --pretty=format:'%H' "$commit_sha")
+        local author_name
+        author_name=$(git log -1 --pretty=format:'%an' "$commit_sha")
+        local author_email
+        author_email=$(git log -1 --pretty=format:'%ae' "$commit_sha")
+        local date_full
+        date_full=$(git log -1 --pretty=format:'%aI' "$commit_sha")
+        local commit_subject
+        commit_subject=$(git log -1 --pretty=format:'%s' "$commit_sha")
+        local commit_body
+        commit_body=$(git log -1 --pretty=format:'%b' "$commit_sha")
 
         # Use jq to properly encode all values as JSON (handles special characters and escaping)
         jq -n \
@@ -518,7 +547,7 @@ do_export() {
     echo -e "\n2. Committing $total_generated transfer file pair(s) into temporary branch in REPO 1 Holder..."
 
     # Check out REPO 1 Holder
-    cd "$repo1_holder_path"
+    cd "$repo1_holder_path" || error_exit "Could not change directory to $repo1_holder_path"
 
     # Check if REPO 1 has an 'origin' remote defined
     if ! git remote -v | grep -q 'origin'; then
@@ -540,7 +569,8 @@ do_export() {
     git commit -m "Bridge: Transfer of $total_generated commit(s) from ${repo2_original_branch}" || error_exit "Failed to create commit in REPO 1."
 
     # Get the commit SHA for reference
-    local bridge_commit=$(git rev-parse HEAD)
+    local bridge_commit
+    bridge_commit=$(git rev-parse HEAD)
 
     # 3. Return to original branch and clean up temp work directory
     echo -e "\n3. Cleaning up local workspace in REPO 1 Holder..."
@@ -552,7 +582,7 @@ do_export() {
 
     # 4. Restore any stashed changes in both repositories
     restore_stashed_changes "$repo1_holder_path"
-    restore_stashed_changes "$repo2_source_path"
+    restore_stashed_changes "$repo2_src_path"
 
     echo -e "\n✅ EXPORT SUCCESSFUL."
     echo "======================================================="
@@ -595,13 +625,15 @@ do_import() {
         echo "==> Auto-finding bridge branch..." >&2
 
         # Find bridge branches in the bridge repo
-        local bridge_branches=$(find_bridge_branches "$repo1_bridge_path")
+        local bridge_branches
+        bridge_branches=$(find_bridge_branches "$repo1_bridge_path")
 
         if [ -z "$bridge_branches" ]; then
             error_exit "No bridge branches found. Please provide branch name manually."
         fi
 
-        local branch_count=$(echo "$bridge_branches" | wc -l)
+        local branch_count
+        branch_count=$(echo "$bridge_branches" | wc -l)
 
         if [ "$branch_count" -eq 1 ]; then
             temp_branch=$(echo "$bridge_branches" | head -1)
@@ -639,12 +671,13 @@ do_import() {
 
     # Check REPO 2 (The DESTINATION repository)
     check_clean_working_directory "$repo2_dest_path" "import-destination"
-    local repo2_original_branch=$(get_current_branch)
+    local repo2_original_branch
+    repo2_original_branch=$(get_current_branch)
 
     echo "INFO: Bridge path: $repo1_bridge_path"
     echo "INFO: Destination path: $repo2_dest_path (Branch: $repo2_original_branch)"
 
-    cd "$repo2_dest_path"
+    cd "$repo2_dest_path" || error_exit "Could not change directory to $repo2_dest_path"
 
     # 1. Fetch the bridge branch from the bridge repository
     echo -e "\n1. Fetching temporary branch '$temp_branch' from bridge repository..."
@@ -662,13 +695,14 @@ do_import() {
     # 3. Sort patches by filename (which contains the chronological index) and apply sequentially
     echo -e "\n3. Sorting and applying patches sequentially..."
 
-    # The 'ls ... | sort' command relies on the 001_, 002_ prefix for correct ordering
-    local patch_files_sorted=$(ls -1 "$TRANSFER_DIR/"[0-9][0-9][0-9]_"${TRANSFER_FILE_PREFIX}_"*.patch 2>/dev/null | sort)
+    # Use find to locate patch files and sort by the 001_, 002_ prefix for correct ordering
+    local patch_files_sorted
+    patch_files_sorted=$(find "$TRANSFER_DIR" -maxdepth 1 -name '[0-9][0-9][0-9]_'"${TRANSFER_FILE_PREFIX}_"'*.patch' 2>/dev/null | sort)
     local num_patches=0
     local applied_count=0
 
     # Count the number of patches found
-    for file in $patch_files_sorted; do
+    for _file in $patch_files_sorted; do
         num_patches=$((num_patches + 1))
     done
 
@@ -680,8 +714,10 @@ do_import() {
     for patch_file in $patch_files_sorted; do
         # Extract the SHA from the file name using sed's extended regex for reliability
         # Matches: 001_commit_SHA.patch and captures SHA
-        local filename=$(basename "$patch_file")
-        local short_sha=$(echo "$filename" | sed -E "s/^[0-9]+_${TRANSFER_FILE_PREFIX}_([0-9a-fA-F]+)\.patch$/\1/")
+        local filename
+        filename=$(basename "$patch_file")
+        local short_sha
+        short_sha=$(echo "$filename" | sed -E "s/^[0-9]+_${TRANSFER_FILE_PREFIX}_([0-9a-fA-F]+)\.patch$/\1/")
 
         # Construct the JSON file name from the patch file name
         local json_file="${patch_file/.patch/.json}"
@@ -702,10 +738,14 @@ do_import() {
         git apply --whitespace=fix "$patch_file" || error_exit "Failed to apply patch for $short_sha. Manual conflict resolution needed."
 
         # Extract Metadata
-        local author_name=$(jq -r '.author_name' "$json_file")
-        local author_email=$(jq -r '.author_email' "$json_file")
-        local commit_subject=$(jq -r '.commit_subject' "$json_file")
-        local commit_body=$(jq -r '.commit_body' "$json_file")
+        local author_name
+        author_name=$(jq -r '.author_name' "$json_file")
+        local author_email
+        author_email=$(jq -r '.author_email' "$json_file")
+        local commit_subject
+        commit_subject=$(jq -r '.commit_subject' "$json_file")
+        local commit_body
+        commit_body=$(jq -r '.commit_body' "$json_file")
 
         # Prepare commit
         git add .
