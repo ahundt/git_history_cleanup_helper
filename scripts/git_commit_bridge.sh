@@ -789,6 +789,8 @@ do_import() {
         author_name=$(jq -r '.author_name' "$json_file")
         local author_email
         author_email=$(jq -r '.author_email' "$json_file")
+        local date_full
+        date_full=$(jq -r '.date_full' "$json_file")
         local commit_subject
         commit_subject=$(jq -r '.commit_subject' "$json_file")
         local commit_body
@@ -797,9 +799,11 @@ do_import() {
         # Prepare commit
         git add .
 
-        # Preserve original author details (Committer will be the user on Machine 2)
+        # Preserve original author details and timestamp (Committer will be the user on Machine 2)
         export GIT_AUTHOR_NAME="$author_name"
         export GIT_AUTHOR_EMAIL="$author_email"
+        export GIT_AUTHOR_DATE="$date_full"
+        export GIT_COMMITTER_DATE="$date_full"
 
         local full_message="$commit_subject\n\n$commit_body"
 
