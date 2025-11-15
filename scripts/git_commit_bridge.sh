@@ -22,6 +22,7 @@ TEMP_BRANCH_BASE="claude"
 TRANSFER_DIR=".bridge-transfer" # Dedicated directory inside REPO 1 root for transfer files
 TRANSFER_FILE_PREFIX="commit"
 ENABLE_AUTO_STASH=false  # Safe by default: require explicit --stash flag
+REMOTE_NAME="origin"     # Default remote name (can be overridden with --remote flag)
 # --- End Configuration ---
 
 # Function to inform user about stashes and temp files on error
@@ -876,13 +877,58 @@ do_cleanup() {
     fi
 
     echo "--- Starting CLEANUP: Deleting transfer branch from REPO 1 Holder ---"
+    echo "INFO: Using remote: $REMOTE_NAME"
 
     # Check REPO 1
     cd "$repo1_holder_path" || error_exit "Could not change directory to $repo1_holder_path"
 
+    # Verify the specified remote exists
+    if ! git remote -v | grep -q "^${REMOTE_NAME}\s"; then
+        echo ""
+        echo "ERROR: Remote '$REMOTE_NAME' not found in this repository."
+        echo ""
+        echo "Available remotes:"
+        git remote -v
+        echo ""
+        error_exit "Please specify the correct remote with --remote <name> flag."
+    fi
+
+    # Check if we're currently on the branch we're trying to delete
+    local current_branch
+    current_branch=$(get_current_branch)
+
+    if [[ "$current_branch" == "$temp_branch" ]]; then
+        echo ""
+        echo "⚠️  WARNING: You are currently on branch '$temp_branch'"
+        echo "Cannot delete the branch you're currently on."
+        echo ""
+
+        # Try to find a safe branch to switch to
+        local safe_branch=""
+        for branch in main master develop; do
+            if git branch --list "$branch" | grep -q "$branch"; then
+                safe_branch="$branch"
+                break
+            fi
+        done
+
+        if [[ -z "$safe_branch" ]]; then
+            # No standard branch found, get the first non-bridge branch
+            safe_branch=$(git branch --list | grep -v "$temp_branch" | head -1 | sed 's/^[* ]*//')
+        fi
+
+        if [[ -n "$safe_branch" ]]; then
+            echo "Automatically switching to branch '$safe_branch'..."
+            git checkout "$safe_branch" || error_exit "Failed to switch away from bridge branch. Please manually checkout another branch first."
+            echo "✅ Switched to '$safe_branch'"
+        else
+            error_exit "No safe branch to switch to. Please manually checkout another branch before running cleanup."
+        fi
+    fi
+
     # 1. Delete remote branch
-    echo -e "\n1. Deleting remote bridge branch '$temp_branch' from origin..."
-    git push origin --delete "$temp_branch" || error_exit "Failed to delete remote branch. Check REPO 1's push access."
+    echo -e "\n1. Deleting remote bridge branch '$temp_branch' from $REMOTE_NAME..."
+    git push "$REMOTE_NAME" --delete "$temp_branch" || error_exit "Failed to delete remote branch. Check REPO 1's push access to $REMOTE_NAME."
 
     # 2. Delete local branch (if it exists)
     if git branch --list "$temp_branch" | grep -q "$temp_branch"; then
@@ -893,7 +939,7 @@ do_cleanup() {
     fi
 
     echo -e "\n✅ CLEANUP SUCCESSFUL."
-    echo "The transfer bridge has been safely removed from both REPO 1 and GitHub."
+    echo "The transfer bridge has been safely removed from both REPO 1 and $REMOTE_NAME."
 }
 
 # ==============================================================================
@@ -901,17 +947,44 @@ do_cleanup() {
 # ==============================================================================
 
 # Parse flags from all arguments
-for arg in "$@"; do
+SKIP_NEXT=false
+for i in $(seq 1 $#); do
+    if [[ "$SKIP_NEXT" == "true" ]]; then
+        SKIP_NEXT=false
+        continue
+    fi
+
+    arg="${!i}"
     case "$arg" in
         --stash)
             ENABLE_AUTO_STASH=true
+            ;;
+        --remote)
+            # Get the next argument as the remote name
+            next_i=$((i + 1))
+            REMOTE_NAME="${!next_i}"
+            SKIP_NEXT=true
+            if [[ -z "$REMOTE_NAME" || "$REMOTE_NAME" == --* ]]; then
+                error_exit "--remote flag requires a remote name argument (e.g., --remote origin)"
+            fi
             ;;
     esac
 done
 
 # Parse arguments - detect auto-mode vs manual mode (filter out flags)
 args=()
+SKIP_NEXT_ARG=false
 for arg in "$@"; do
+    if [[ "$SKIP_NEXT_ARG" == "true" ]]; then
+        SKIP_NEXT_ARG=false
+        continue
+    fi
+
+    if [[ "$arg" == "--remote" ]]; then
+        SKIP_NEXT_ARG=true
+        continue
+    fi
+
     if [[ "$arg" != --* ]]; then
         args+=("$arg")
     fi
@@ -980,6 +1053,7 @@ if [ -z "$1" ] || [ "$1" == "--help" ]; then
     echo "   Action: Deletes temporary branch from remote and local"
     echo "   Usage: $0 cleanup <HOLDER_REPO> <TEMP_BRANCH_NAME>"
     echo "   Example: $0 cleanup ~/bridge ${TEMP_BRANCH_BASE}/main-${RANDOM_SUFFIX}"
+    echo "   Example: $0 cleanup ~/bridge ${TEMP_BRANCH_BASE}/main-${RANDOM_SUFFIX} --remote ahundt"
     echo ""
     echo "========== OPTIONS ==========="
     echo ""
@@ -995,6 +1069,16 @@ if [ -z "$1" ] || [ "$1" == "--help" ]; then
     echo ""
     echo "               IMPORTANT: Without --stash, you'll receive clear error"
     echo "               messages with three options if uncommitted files exist."
+    echo ""
+    echo "--remote <name> Specify which remote to use for push/delete operations"
+    echo "               (Default: origin)"
+    echo ""
+    echo "               Use this when your repository has multiple remotes and the"
+    echo "               bridge branch is not on 'origin'. The script will verify"
+    echo "               the remote exists before attempting operations."
+    echo ""
+    echo "               Example: $0 cleanup ~/bridge my-branch --remote ahundt"
+    echo "               Example: $0 export ~/app ~/bridge 3 --remote upstream"
     echo "======================================================="
     exit 0
 fi
