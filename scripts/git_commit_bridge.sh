@@ -36,10 +36,42 @@ check_dependencies() {
     command -v jq >/dev/null 2>&1 || error_exit "Required dependency 'jq' not found. Please install 'jq' (JSON processor) to handle metadata."
 }
 
+# ==============================================================================
+# Robust Stashing System
+# ==============================================================================
+# Automatically stashes uncommitted/untracked files before operations and restores
+# them afterward. Designed to be "easy to use correctly, hard to use incorrectly."
+#
+# Key Features:
+# - Unique ID per stash (PID + timestamp + random) prevents conflicts
+# - Works with existing user stashes (doesn't pop wrong ones)
+# - Handles multiple script runs safely (each gets unique ID)
+# - Detects orphaned stashes from previous failed runs
+# - Uses absolute paths to handle same-named repos in different locations
+# - Searches by ID instead of assuming stash index
+# - Graceful handling of manual user intervention
+# - Detailed error messages with recovery instructions
+#
+# Edge Cases Handled:
+# ✅ Clean repository (no stash created)
+# ✅ Existing user stashes (ID-based targeting)
+# ✅ Multiple bridge stashes from failed runs (unique IDs + warnings)
+# ✅ User manually pops stash during operation (detected and skipped)
+# ✅ Stash restore conflicts (preserved with recovery steps)
+# ✅ Same repo name in different paths (absolute path keys)
+# ✅ Stash index changes during operation (search by ID)
+# ✅ Repository moved/deleted (graceful error handling)
+# ==============================================================================
+
 # Function to check for uncommitted changes
 # The EXPORT source (REPO 2) MUST be clean, as the transfer starts from a commit.
+# If untracked or uncommitted files exist, automatically stash them with a warning.
+# Parameters:
+#   $1: repo_path - path to repository
+#   $2: operation - "export", "import", or role like "source", "holder", "destination"
 check_clean_working_directory() {
     local repo_path="$1"
+    local operation="${2:-bridge}"  # Default to "bridge" if not specified
     local repo_name=$(basename "$repo_path")
 
     cd "$repo_path" || error_exit "Could not change directory to $repo_path. Please check the path."
@@ -48,9 +80,199 @@ check_clean_working_directory() {
         error_exit "Path '$repo_path' is not a valid Git repository."
     fi
 
-    # Check for uncommitted work
-    if [[ -n $(git status --porcelain) ]]; then
-        error_exit "Repository '$repo_name' has uncommitted changes. Please commit or stash them before running this script."
+    # Check for orphaned stashes from previous runs before we create a new one
+    warn_about_orphaned_stashes "$repo_path"
+
+    # Check for uncommitted or untracked work
+    local git_status=$(git status --porcelain)
+    if [[ -n "$git_status" ]]; then
+        echo "" >&2
+        echo "=======================================================" >&2
+        echo "⚠️  WARNING: Repository '$repo_name' has uncommitted or untracked files" >&2
+        echo "=======================================================" >&2
+        echo "$git_status" >&2
+        echo "" >&2
+        echo "These changes will be automatically stashed and restored after the operation." >&2
+        echo "=======================================================" >&2
+        echo "" >&2
+
+        # Get current branch for context
+        local current_branch=$(get_current_branch)
+
+        # Generate a short unique ID (first 8 chars of hash)
+        local unique_id=$(echo "$$-$(date +%s)-${RANDOM}" | md5sum 2>/dev/null | cut -c1-8 || echo "$$-${RANDOM}")
+
+        # Create human-readable stash message with full context
+        # Format: git_commit_bridge[operation]: repo@branch (timestamp) [ID:xyz123]
+        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        local stash_message="git_commit_bridge[$operation]: ${repo_name}@${current_branch} ($timestamp) [ID:${unique_id}]"
+
+        # Get current stash count BEFORE creating our stash
+        local stash_count_before=$(git stash list | wc -l | tr -d ' ')
+
+        # Stash both tracked changes and untracked files
+        if ! git stash push --include-untracked -m "$stash_message" > /dev/null 2>&1; then
+            error_exit "Failed to stash uncommitted changes in '$repo_name'. Please manually commit or stash them."
+        fi
+
+        # Verify the stash was created
+        local stash_count_after=$(git stash list | wc -l | tr -d ' ')
+        if [ "$stash_count_after" -le "$stash_count_before" ]; then
+            error_exit "Stash creation appeared to succeed but stash count did not increase. Manual intervention needed."
+        fi
+
+        # Find the exact index of our newly created stash (should be stash@{0} but verify)
+        local our_stash_index=""
+        local idx=0
+        while IFS= read -r stash_entry; do
+            if echo "$stash_entry" | grep -q "$unique_id"; then
+                our_stash_index=$idx
+                break
+            fi
+            idx=$((idx + 1))
+        done < <(git stash list)
+
+        if [ -z "$our_stash_index" ]; then
+            error_exit "Created stash but could not locate it in stash list. Manual intervention needed."
+        fi
+
+        echo "✅ Changes stashed successfully at stash@{$our_stash_index}" >&2
+        echo "   Stash: $stash_message" >&2
+        echo "" >&2
+
+        # Store stash information using absolute repo path to handle same-named repos in different locations
+        local repo_path_normalized=$(cd "$repo_path" && pwd)
+        local repo_key="${repo_path_normalized//[^a-zA-Z0-9]/_}"
+
+        eval "STASHED_${repo_key}=true"
+        eval "STASH_UNIQUE_ID_${repo_key}='$unique_id'"
+        eval "STASH_REPO_PATH_${repo_key}='$repo_path_normalized'"
+        eval "STASH_MESSAGE_${repo_key}='$stash_message'"
+    fi
+}
+
+# Function to restore stashed changes if they were auto-stashed
+# Uses unique stash ID to precisely target the correct stash even with multiple existing stashes
+restore_stashed_changes() {
+    local repo_path="$1"
+
+    # Normalize the repo path to match how it was stored
+    local repo_path_normalized
+    if ! repo_path_normalized=$(cd "$repo_path" 2>/dev/null && pwd); then
+        echo "⚠️  WARNING: Could not access directory $repo_path to restore stash" >&2
+        echo "If you stashed changes there, navigate to the repository and check 'git stash list'." >&2
+        return 1
+    fi
+
+    local repo_name=$(basename "$repo_path_normalized")
+    local repo_key="${repo_path_normalized//[^a-zA-Z0-9]/_}"
+    local stash_flag_var="STASHED_${repo_key}"
+    local stash_id_var="STASH_UNIQUE_ID_${repo_key}"
+
+    # Check if we stashed changes for this repository
+    if [[ "${!stash_flag_var}" != "true" ]]; then
+        return 0  # Nothing to restore
+    fi
+
+    cd "$repo_path_normalized" || {
+        echo "⚠️  WARNING: Could not change to directory $repo_path_normalized to restore stash" >&2
+        echo "Your changes are saved in a stash. Navigate there and run:" >&2
+        echo "  git stash list  # Find the stash with ID: ${!stash_id_var}" >&2
+        echo "  git stash pop stash@{N}  # Where N is the stash index" >&2
+        return 1
+    }
+
+    local unique_id="${!stash_id_var}"
+
+    echo "" >&2
+    echo "=======================================================" >&2
+    echo "📦 Restoring stashed changes in '$repo_name'..." >&2
+    echo "   Looking for stash ID: $unique_id" >&2
+    echo "=======================================================" >&2
+
+    # Find the exact stash index by searching for our unique ID
+    local our_stash_index=""
+    local idx=0
+    while IFS= read -r stash_entry; do
+        if echo "$stash_entry" | grep -q "$unique_id"; then
+            our_stash_index=$idx
+            break
+        fi
+        idx=$((idx + 1))
+    done < <(git stash list 2>/dev/null)
+
+    if [ -z "$our_stash_index" ]; then
+        echo "ℹ️  Stash not found (may have been manually restored or dropped already)" >&2
+        echo "   Current stashes:" >&2
+        git stash list | head -5 >&2 || echo "   (none)" >&2
+        echo "=======================================================" >&2
+        echo "" >&2
+        return 0
+    fi
+
+    echo "   Found at: stash@{$our_stash_index}" >&2
+    echo "" >&2
+
+    # Pop the specific stash by index (not just the top one!)
+    local pop_output
+    if pop_output=$(git stash pop --index "stash@{$our_stash_index}" 2>&1); then
+        echo "✅ Stashed changes restored successfully" >&2
+    else
+        # Check if the error is due to conflicts
+        if echo "$pop_output" | grep -qi "conflict"; then
+            echo "⚠️  WARNING: Stash restore encountered conflicts" >&2
+            echo "" >&2
+            echo "$pop_output" >&2
+            echo "" >&2
+            echo "Your changes are still saved in stash@{$our_stash_index}" >&2
+            echo "The stash remains in the list because conflicts prevented automatic merge." >&2
+            echo "" >&2
+            echo "To manually restore:" >&2
+            echo "  1. Resolve the conflicts shown above" >&2
+            echo "  2. Run 'git add <resolved-files>'" >&2
+            echo "  3. Run 'git stash drop stash@{$our_stash_index}' to remove the stash" >&2
+            echo "  OR run 'git reset --hard' and 'git stash apply stash@{$our_stash_index}' to retry" >&2
+        else
+            echo "⚠️  WARNING: Could not auto-restore stash" >&2
+            echo "" >&2
+            echo "Error output:" >&2
+            echo "$pop_output" >&2
+            echo "" >&2
+            echo "Your changes are still saved in stash@{$our_stash_index}" >&2
+            echo "Run 'git stash pop stash@{$our_stash_index}' to manually restore them." >&2
+        fi
+    fi
+    echo "=======================================================" >&2
+    echo "" >&2
+}
+
+# Function to warn about orphaned auto-stashes from previous failed runs
+# This helps users understand if there are leftover stashes that need attention
+warn_about_orphaned_stashes() {
+    local repo_path="$1"
+
+    cd "$repo_path" 2>/dev/null || return 0
+
+    # Look for any stashes that match our auto-stash pattern
+    local orphaned_stashes=$(git stash list 2>/dev/null | grep "git_commit_bridge\[" || true)
+
+    if [ -n "$orphaned_stashes" ]; then
+        local count=$(echo "$orphaned_stashes" | wc -l | tr -d ' ')
+        echo "" >&2
+        echo "=======================================================" >&2
+        echo "ℹ️  NOTICE: Found $count orphaned auto-stash(es) from previous runs" >&2
+        echo "=======================================================" >&2
+        echo "$orphaned_stashes" >&2
+        echo "" >&2
+        echo "These are likely from previous script runs that were interrupted." >&2
+        echo "They will not interfere with this run (each stash has a unique ID)." >&2
+        echo "" >&2
+        echo "To clean up manually:" >&2
+        echo "  git stash list                    # View all stashes" >&2
+        echo "  git stash drop stash@{N}          # Drop specific stash" >&2
+        echo "  git stash clear                   # Remove ALL stashes (use with caution!)" >&2
+        echo "=======================================================" >&2
+        echo "" >&2
     fi
 }
 
@@ -148,11 +370,11 @@ do_export() {
     # --- Validation and Pre-checks ---
 
     # Check REPO 2 (The SOURCE repository) - Must be clean
-    check_clean_working_directory "$repo2_src_path"
+    check_clean_working_directory "$repo2_src_path" "export-source"
     local repo2_original_branch=$(get_current_branch)
 
     # Check REPO 1 (The PUSHING/HOLDER repository)
-    check_clean_working_directory "$repo1_holder_path"
+    check_clean_working_directory "$repo1_holder_path" "export-holder"
     local repo1_original_branch=$(get_current_branch)
 
     echo "INFO: REPO 2 Source path: $repo2_src_path (Branch: $repo2_original_branch)"
@@ -265,6 +487,10 @@ do_export() {
     git checkout "$repo1_original_branch" || error_exit "Failed to return to original branch in REPO 1. Manual intervention needed."
     rm -rf "$temp_work_dir"
 
+    # 4. Restore any stashed changes in both repositories
+    restore_stashed_changes "$repo1_holder_path"
+    restore_stashed_changes "$repo2_source_path"
+
     echo -e "\n✅ EXPORT SUCCESSFUL."
     echo "======================================================="
     echo "Bridge branch created: ${temp_branch}"
@@ -349,7 +575,7 @@ do_import() {
     fi
 
     # Check REPO 2 (The DESTINATION repository)
-    check_clean_working_directory "$repo2_dest_path"
+    check_clean_working_directory "$repo2_dest_path" "import-destination"
     local repo2_original_branch=$(get_current_branch)
 
     echo "INFO: Bridge path: $repo1_bridge_path"
@@ -443,6 +669,9 @@ do_import() {
 
     # Delete temporary branch
     git branch -D "$local_temp_branch" || error_exit "Failed to delete temporary local branch. Manual intervention needed."
+
+    # Restore any stashed changes in the destination repository
+    restore_stashed_changes "$repo2_dest_path"
 
     echo -e "\n✅ IMPORT SUCCESSFUL."
     echo "$applied_count commit(s) have been applied and committed to your current branch ($repo2_original_branch) with full metadata preserved."
