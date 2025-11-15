@@ -257,37 +257,56 @@ do_export() {
     git add "$TRANSFER_DIR"
     git commit -m "Bridge: Transfer of $total_generated commit(s) from ${repo2_original_branch}" || error_exit "Failed to create commit in REPO 1."
 
-    # 3. Push the temporary branch from REPO 1 to the GitHub Remote
-    echo -e "\n3. Pushing temporary branch to GitHub remote..."
-    git push origin "$temp_branch" || error_exit "Failed to push temporary branch to GitHub remote. Check REPO 1's push access/permissions."
+    # Get the commit SHA for reference
+    local bridge_commit=$(git rev-parse HEAD)
 
-    # 4. Clean up REPO 1 and temp work directory
-    echo -e "\n4. Cleaning up local workspace in REPO 1 Holder..."
+    # 3. Return to original branch and clean up temp work directory
+    echo -e "\n3. Cleaning up local workspace in REPO 1 Holder..."
     git checkout "$repo1_original_branch" || error_exit "Failed to return to original branch in REPO 1. Manual intervention needed."
-    git branch -D "$temp_branch" || error_exit "Failed to delete local temporary branch in REPO 1. Manual intervention needed."
     rm -rf "$temp_work_dir"
 
     echo -e "\n✅ EXPORT SUCCESSFUL."
-    echo "The changes are now available on the remote in branch: ${temp_branch}"
-    echo "Next: Run 'import' on the destination machine."
+    echo "======================================================="
+    echo "Bridge branch created: ${temp_branch}"
+    echo "Bridge commit: ${bridge_commit}"
+    echo "======================================================="
+    echo ""
+    echo "NEXT STEPS:"
+    echo ""
+    echo "1. Push the bridge branch to make it available for import:"
+    echo "   cd $repo1_holder_path"
+    echo "   git push origin $temp_branch"
+    echo ""
+    echo "2. On the destination machine, run import:"
+    echo "   $0 import <BRIDGE_REPO> <DEST_REPO>"
+    echo ""
+    echo "3. After successful import, clean up the bridge branch:"
+    echo "   $0 cleanup $repo1_holder_path $temp_branch"
+    echo "======================================================="
 }
 
 # ==============================================================================
 # MODE 2: IMPORT (Remote -> Destination)
-# USAGE: ./git_commit_bridge.sh import <REPO 2 DEST PATH> <FULL TEMP BRANCH NAME>
+# USAGE: ./git_commit_bridge.sh import <BRIDGE_REPO_PATH> <DEST_REPO_PATH> [TEMP_BRANCH_NAME]
 # ==============================================================================
 do_import() {
-    local repo2_dest_path="$1"
-    local temp_branch="$2"
+    local repo1_bridge_path="$1"
+    local repo2_dest_path="$2"
+    local temp_branch="$3"
 
     check_dependencies
+
+    # Validate bridge repo path
+    if [[ -z "$repo1_bridge_path" ]]; then
+        error_exit "Bridge repository path is required for import mode."
+    fi
 
     # Auto-find bridge branch if not provided
     if [[ -z "$temp_branch" ]]; then
         echo "==> Auto-finding bridge branch..." >&2
 
-        # Try to find bridge branches by checking if first arg is actually a bridge repo
-        local bridge_branches=$(find_bridge_branches "$repo2_dest_path")
+        # Find bridge branches in the bridge repo
+        local bridge_branches=$(find_bridge_branches "$repo1_bridge_path")
 
         if [ -z "$bridge_branches" ]; then
             error_exit "No bridge branches found. Please provide branch name manually."
@@ -313,7 +332,7 @@ do_import() {
             echo "Please re-run with explicit branch selection using one of:" >&2
             echo "" >&2
             while IFS= read -r branch; do
-                echo "  $0 import $repo2_dest_path $branch" >&2
+                echo "  $0 import $repo1_bridge_path $repo2_dest_path $branch" >&2
             done <<< "$bridge_branches"
             echo "=======================================================" >&2
             exit 0
@@ -324,15 +343,23 @@ do_import() {
 
     # --- Validation and Pre-checks ---
 
+    # Check REPO 1 (The BRIDGE repository)
+    if [ ! -d "$repo1_bridge_path/.git" ]; then
+        error_exit "Bridge repository path '$repo1_bridge_path' is not a valid Git repository."
+    fi
+
     # Check REPO 2 (The DESTINATION repository)
     check_clean_working_directory "$repo2_dest_path"
     local repo2_original_branch=$(get_current_branch)
 
+    echo "INFO: Bridge path: $repo1_bridge_path"
+    echo "INFO: Destination path: $repo2_dest_path (Branch: $repo2_original_branch)"
+
     cd "$repo2_dest_path"
 
-    # 1. Fetch the remote branch
-    echo -e "\n1. Fetching temporary branch '$temp_branch' from remote..."
-    git fetch origin "$temp_branch" || error_exit "Failed to fetch remote branch '$temp_branch'. Check connection/branch name."
+    # 1. Fetch the bridge branch from the bridge repository
+    echo -e "\n1. Fetching temporary branch '$temp_branch' from bridge repository..."
+    git fetch "$repo1_bridge_path" "$temp_branch" || error_exit "Failed to fetch branch '$temp_branch' from bridge repo. Check repo path and branch name."
 
     # 2. Check out the transfer files into a temporary local branch
     local local_temp_branch="local-bridge-$$"
@@ -492,31 +519,33 @@ if [ -z "$1" ] || [ "$1" == "--help" ]; then
     echo ""
     echo "Machine 1 (EXPORT): $0 <SOURCE_REPO> <BRIDGE_REPO> [N_COMMITS]"
     echo "  - Auto-counts unpushed commits if N_COMMITS not specified"
-    echo "  - Generates patches and pushes via bridge repo"
+    echo "  - Generates patches and commits to bridge repo (push manually)"
     echo "  Example: $0 ~/my-app ~/cli-bridge"
     echo "  Example: $0 ~/my-app ~/cli-bridge 5"
     echo ""
     echo "Machine 2 (IMPORT): $0 <BRIDGE_REPO> <DEST_REPO>"
     echo "  - Auto-finds bridge branch (exits with options if multiple exist)"
-    echo "  - Applies patches to destination repo"
+    echo "  - Fetches from bridge repo and applies patches to destination"
     echo "  Example: $0 ~/cli-bridge ~/my-app"
     echo ""
     echo "How auto-detection works:"
-    echo "  - EXPORT: First repo has commits, second repo can push"
-    echo "  - IMPORT: First repo has bridge branches matching pattern"
+    echo "  - EXPORT: First repo has unpushed commits"
+    echo "  - IMPORT: First repo (bridge) has bridge branches matching pattern"
     echo ""
 
     echo "========== MANUAL MODE (Advanced) ==========="
     echo ""
     echo "1. EXPORT (Machine 1: Create Bridge)"
-    echo "   Action: Takes last [N] commit(s), packages as patches, pushes via holder repo"
-    echo "   Usage: $0 export <SOURCE_REPO> <HOLDER_REPO> [N_COMMITS=1]"
+    echo "   Action: Takes last [N] commit(s), packages as patches, commits to bridge repo"
+    echo "   Usage: $0 export <SOURCE_REPO> <BRIDGE_REPO> [N_COMMITS=1]"
     echo "   Example: $0 export ~/app ~/bridge 3"
+    echo "   Note: You must manually push the bridge branch after export"
     echo ""
     echo "2. IMPORT (Machine 2: Apply Changes)"
-    echo "   Action: Fetches branch, applies patches sequentially with metadata"
-    echo "   Usage: $0 import <DEST_REPO> <TEMP_BRANCH_NAME>"
-    echo "   Example: $0 import ~/app ${TEMP_BRANCH_BASE}/main-${RANDOM_SUFFIX}"
+    echo "   Action: Fetches from bridge repo, applies patches sequentially with metadata"
+    echo "   Usage: $0 import <BRIDGE_REPO> <DEST_REPO> [TEMP_BRANCH_NAME]"
+    echo "   Example: $0 import ~/bridge ~/app"
+    echo "   Example: $0 import ~/bridge ~/app ${TEMP_BRANCH_BASE}/main-${RANDOM_SUFFIX}"
     echo ""
     echo "3. CLEANUP (Machine 1: Remove Bridge)"
     echo "   Action: Deletes temporary branch from remote and local"
@@ -541,7 +570,7 @@ case "$MODE" in
             do_export "$REPO_PATH_1" "$REPO_PATH_2_OR_BRANCH_NAME" "$N_COMMITS"
         elif [ "$DETECTED_MODE" == "IMPORT" ]; then
             echo "INFO: Detected IMPORT mode (bridge has bridge branch)" >&2
-            do_import "$REPO_PATH_2_OR_BRANCH_NAME" "" # Auto-find branch in do_import
+            do_import "$REPO_PATH_1" "$REPO_PATH_2_OR_BRANCH_NAME" "" # Bridge repo, dest repo, auto-find branch
         else
             error_exit "Could not auto-detect mode. Use explicit 'export' or 'import' command."
         fi
@@ -553,11 +582,11 @@ case "$MODE" in
         do_export "$REPO_PATH_1" "$REPO_PATH_2_OR_BRANCH_NAME" "$N_COMMITS"
         ;;
     import)
-        if [ -z "$REPO_PATH_1" ]; then
-            error_exit "Import mode requires the DESTINATION REPO path (and optionally TEMP BRANCH NAME)."
+        if [ -z "$REPO_PATH_1" ] || [ -z "$REPO_PATH_2_OR_BRANCH_NAME" ]; then
+            error_exit "Import mode requires two paths: BRIDGE REPO and DEST REPO (and optionally TEMP BRANCH NAME)."
         fi
-        # REPO_PATH_2_OR_BRANCH_NAME can be empty for auto-find
-        do_import "$REPO_PATH_1" "$REPO_PATH_2_OR_BRANCH_NAME"
+        # N_COMMITS is used as third param for branch name in import mode
+        do_import "$REPO_PATH_1" "$REPO_PATH_2_OR_BRANCH_NAME" "$N_COMMITS"
         ;;
     cleanup)
         if [ -z "$REPO_PATH_1" ] || [ -z "$REPO_PATH_2_OR_BRANCH_NAME" ]; then
