@@ -482,6 +482,10 @@ do_export() {
     local repo1_original_branch
     repo1_original_branch=$(get_current_branch)
 
+    # Set up trap to restore stashes on interrupt/error
+    # Must be AFTER stashing checks so we know which repos were stashed
+    trap 'cleanup_on_error' INT TERM
+
     echo "INFO: REPO 2 Source path: $repo2_src_path (Branch: $repo2_original_branch)"
     echo "INFO: REPO 1 Holder path: $repo1_holder_path (Branch: $repo1_original_branch)"
 
@@ -613,6 +617,9 @@ do_export() {
     restore_stashed_changes "$repo1_holder_path"
     restore_stashed_changes "$repo2_src_path"
 
+    # Clear trap now that stashes are restored - prevent double-restoration
+    trap - INT TERM
+
     echo -e "\n✅ EXPORT SUCCESSFUL."
     echo "======================================================="
     echo "Bridge branch created: ${temp_branch}"
@@ -702,6 +709,10 @@ do_import() {
     check_clean_working_directory "$repo2_dest_path" "import-destination"
     local repo2_original_branch
     repo2_original_branch=$(get_current_branch)
+
+    # Set up trap to restore stashes on interrupt/error
+    # Must be AFTER stashing checks so we know which repos were stashed
+    trap 'cleanup_on_error' INT TERM
 
     echo "INFO: Bridge path: $repo1_bridge_path"
     echo "INFO: Destination path: $repo2_dest_path (Branch: $repo2_original_branch)"
@@ -804,6 +815,9 @@ do_import() {
 
     # Restore any stashed changes in the destination repository
     restore_stashed_changes "$repo2_dest_path"
+
+    # Clear trap now that stashes are restored - prevent double-restoration
+    trap - INT TERM
 
     echo -e "\n✅ IMPORT SUCCESSFUL."
     echo "$applied_count commit(s) have been applied and committed to your current branch ($repo2_original_branch) with full metadata preserved."
