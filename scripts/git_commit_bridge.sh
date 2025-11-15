@@ -24,38 +24,55 @@ TRANSFER_FILE_PREFIX="commit"
 ENABLE_AUTO_STASH=false  # Safe by default: require explicit --stash flag
 # --- End Configuration ---
 
-# Function to restore all stashes that were created during this run
-# Called by trap on error/interrupt to ensure stashes are never left orphaned
-cleanup_on_error() {
+# Function to inform user about stashes and temp files on error
+# Provides CONCRETE, ACTIONABLE guidance instead of automatic operations
+inform_cleanup_needed() {
+    local any_stashes=false
+
     echo "" >&2
     echo "=======================================================" >&2
-    echo "Cleaning up before exit..." >&2
+    echo "⚠️  CLEANUP NEEDED BEFORE RETRY" >&2
     echo "=======================================================" >&2
 
-    # Restore any stashes that were created (global tracking)
-    # Loop through all possible repos that might have been stashed
+    # Check if any stashes were created and inform user with EXACT commands
     for repo_var in $(compgen -v | grep "^STASHED_"); do
         if [[ "${!repo_var}" == "true" ]]; then
-            # Extract the repo path from the corresponding variable
+            any_stashes=true
             local path_var="${repo_var/STASHED_/STASH_REPO_PATH_}"
+            local msg_var="${repo_var/STASHED_/STASH_MESSAGE_}"
             local repo_path="${!path_var}"
-            if [[ -n "$repo_path" ]]; then
-                restore_stashed_changes "$repo_path" || true  # Don't fail if restore fails
+            local stash_msg="${!msg_var}"
+
+            if [[ -n "$repo_path" && -n "$stash_msg" ]]; then
+                echo "" >&2
+                echo "Stashed changes in: $repo_path" >&2
+                echo "  Stash: $stash_msg" >&2
+                echo "" >&2
+                echo "To restore:" >&2
+                echo "  cd $repo_path" >&2
+                echo "  git stash list | grep git_commit_bridge   # Find your stash" >&2
+                echo "  git stash pop stash@{N}                   # Restore (N = stash index)" >&2
+                echo "" >&2
             fi
         fi
     done
 
     # If we're in an export operation and temp directory exists, inform user
     if [[ -n "${temp_work_dir:-}" ]] && [[ -d "${temp_work_dir:-}" ]]; then
-        echo "" >&2
-        echo "NOTE: Temporary files preserved for debugging at:" >&2
+        echo "Temporary files preserved for debugging at:" >&2
         echo "  $temp_work_dir" >&2
         echo "" >&2
-        echo "You can:" >&2
-        echo "  - Inspect the files: ls -lR $temp_work_dir" >&2
-        echo "  - Remove manually when done: rm -rf $temp_work_dir" >&2
-        echo "=======================================================" >&2
+        echo "To inspect or remove:" >&2
+        echo "  ls -lR $temp_work_dir                      # Inspect" >&2
+        echo "  rm -rf $temp_work_dir                      # Remove when done" >&2
+        echo "" >&2
     fi
+
+    if [[ "$any_stashes" == "true" ]]; then
+        echo "IMPORTANT: Restore your stashes before re-running the script." >&2
+    fi
+    echo "=======================================================" >&2
+    echo "" >&2
 }
 
 # Function to display error message and exit
@@ -64,8 +81,9 @@ error_exit() {
     echo -e "!!! ERROR: $1" >&2
     echo -e "======================================================="
 
-    # Clean up stashes and temp files before exiting
-    cleanup_on_error
+    # Inform user about cleanup needed (stashes and temp files)
+    # This is INFORMATIVE, not automatic - respects user control
+    inform_cleanup_needed
 
     exit 1
 }
@@ -482,10 +500,6 @@ do_export() {
     local repo1_original_branch
     repo1_original_branch=$(get_current_branch)
 
-    # Set up trap to restore stashes on interrupt/error
-    # Must be AFTER stashing checks so we know which repos were stashed
-    trap 'cleanup_on_error' INT TERM
-
     echo "INFO: REPO 2 Source path: $repo2_src_path (Branch: $repo2_original_branch)"
     echo "INFO: REPO 1 Holder path: $repo1_holder_path (Branch: $repo1_original_branch)"
 
@@ -617,9 +631,6 @@ do_export() {
     restore_stashed_changes "$repo1_holder_path"
     restore_stashed_changes "$repo2_src_path"
 
-    # Clear trap now that stashes are restored - prevent double-restoration
-    trap - INT TERM
-
     echo -e "\n✅ EXPORT SUCCESSFUL."
     echo "======================================================="
     echo "Bridge branch created: ${temp_branch}"
@@ -709,10 +720,6 @@ do_import() {
     check_clean_working_directory "$repo2_dest_path" "import-destination"
     local repo2_original_branch
     repo2_original_branch=$(get_current_branch)
-
-    # Set up trap to restore stashes on interrupt/error
-    # Must be AFTER stashing checks so we know which repos were stashed
-    trap 'cleanup_on_error' INT TERM
 
     echo "INFO: Bridge path: $repo1_bridge_path"
     echo "INFO: Destination path: $repo2_dest_path (Branch: $repo2_original_branch)"
@@ -815,9 +822,6 @@ do_import() {
 
     # Restore any stashed changes in the destination repository
     restore_stashed_changes "$repo2_dest_path"
-
-    # Clear trap now that stashes are restored - prevent double-restoration
-    trap - INT TERM
 
     echo -e "\n✅ IMPORT SUCCESSFUL."
     echo "$applied_count commit(s) have been applied and committed to your current branch ($repo2_original_branch) with full metadata preserved."
