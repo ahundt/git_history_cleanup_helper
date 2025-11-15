@@ -24,11 +24,26 @@ TRANSFER_FILE_PREFIX="commit"
 ENABLE_AUTO_STASH=false  # Safe by default: require explicit --stash flag
 # --- End Configuration ---
 
-# Function to display error message and exit
-error_exit() {
-    echo -e "\n======================================================="
-    echo -e "!!! ERROR: $1" >&2
-    echo -e "======================================================="
+# Function to restore all stashes that were created during this run
+# Called by trap on error/interrupt to ensure stashes are never left orphaned
+cleanup_on_error() {
+    echo "" >&2
+    echo "=======================================================" >&2
+    echo "Cleaning up before exit..." >&2
+    echo "=======================================================" >&2
+
+    # Restore any stashes that were created (global tracking)
+    # Loop through all possible repos that might have been stashed
+    for repo_var in $(compgen -v | grep "^STASHED_"); do
+        if [[ "${!repo_var}" == "true" ]]; then
+            # Extract the repo path from the corresponding variable
+            local path_var="${repo_var/STASHED_/STASH_REPO_PATH_}"
+            local repo_path="${!path_var}"
+            if [[ -n "$repo_path" ]]; then
+                restore_stashed_changes "$repo_path" || true  # Don't fail if restore fails
+            fi
+        fi
+    done
 
     # If we're in an export operation and temp directory exists, inform user
     if [[ -n "${temp_work_dir:-}" ]] && [[ -d "${temp_work_dir:-}" ]]; then
@@ -41,6 +56,16 @@ error_exit() {
         echo "  - Remove manually when done: rm -rf $temp_work_dir" >&2
         echo "=======================================================" >&2
     fi
+}
+
+# Function to display error message and exit
+error_exit() {
+    echo -e "\n======================================================="
+    echo -e "!!! ERROR: $1" >&2
+    echo -e "======================================================="
+
+    # Clean up stashes and temp files before exiting
+    cleanup_on_error
 
     exit 1
 }
@@ -279,6 +304,10 @@ restore_stashed_changes() {
     local pop_output
     if pop_output=$(git stash pop --index "stash@{$our_stash_index}" 2>&1); then
         echo "✅ Stashed changes restored successfully" >&2
+
+        # Clear the stash flag now that it's been successfully restored
+        # This makes the function truly idempotent - safe to call multiple times
+        eval "STASHED_${repo_key}=false"
     else
         # Check if the error is due to conflicts
         if echo "$pop_output" | grep -qi "conflict"; then
