@@ -796,6 +796,20 @@ do_import() {
         local commit_body
         commit_body=$(jq -r '.commit_body' "$json_file")
 
+        # Validate critical metadata was extracted successfully
+        if [[ -z "$author_name" || "$author_name" == "null" ]]; then
+            error_exit "Failed to extract author_name from $json_file"
+        fi
+        if [[ -z "$author_email" || "$author_email" == "null" ]]; then
+            error_exit "Failed to extract author_email from $json_file"
+        fi
+        if [[ -z "$date_full" || "$date_full" == "null" ]]; then
+            error_exit "Failed to extract date_full from $json_file"
+        fi
+        if [[ -z "$commit_subject" || "$commit_subject" == "null" ]]; then
+            error_exit "Failed to extract commit_subject from $json_file"
+        fi
+
         # Prepare commit
         git add .
 
@@ -809,6 +823,8 @@ do_import() {
 
         git commit -F <(echo -e "$full_message") || error_exit "Failed to create final commit for $short_sha. Are there changes to commit?"
 
+        # Unset environment variables to prevent pollution across iterations
+        unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_DATE
 
     done
 
