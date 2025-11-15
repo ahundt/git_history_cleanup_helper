@@ -21,6 +21,7 @@ RANDOM_SUFFIX="01WqaAvCxRr6eWW2Wu33e8xP"
 TEMP_BRANCH_BASE="claude"
 TRANSFER_DIR=".bridge-transfer" # Dedicated directory inside REPO 1 root for transfer files
 TRANSFER_FILE_PREFIX="commit"
+ENABLE_AUTO_STASH=false  # Safe by default: require explicit --stash flag
 # --- End Configuration ---
 
 # Function to display error message and exit
@@ -28,6 +29,19 @@ error_exit() {
     echo -e "\n======================================================="
     echo -e "!!! ERROR: $1" >&2
     echo -e "======================================================="
+
+    # If we're in an export operation and temp directory exists, inform user
+    if [[ -n "${temp_work_dir:-}" ]] && [[ -d "${temp_work_dir:-}" ]]; then
+        echo "" >&2
+        echo "NOTE: Temporary files preserved for debugging at:" >&2
+        echo "  $temp_work_dir" >&2
+        echo "" >&2
+        echo "You can:" >&2
+        echo "  - Inspect the files: ls -lR $temp_work_dir" >&2
+        echo "  - Remove manually when done: rm -rf $temp_work_dir" >&2
+        echo "=======================================================" >&2
+    fi
+
     exit 1
 }
 
@@ -86,9 +100,48 @@ check_clean_working_directory() {
     # Check for uncommitted or untracked work
     local git_status=$(git status --porcelain)
     if [[ -n "$git_status" ]]; then
+
+        # If auto-stash is NOT enabled, provide actionable error message and exit
+        if [[ "$ENABLE_AUTO_STASH" != "true" ]]; then
+            echo "" >&2
+            echo "=======================================================" >&2
+            echo "❌ ERROR: Repository '$repo_name' has uncommitted or untracked files" >&2
+            echo "=======================================================" >&2
+            echo "$git_status" >&2
+            echo "" >&2
+            echo "This script requires a clean working directory to ensure safe operation." >&2
+            echo "" >&2
+            echo "You have 3 options:" >&2
+            echo "" >&2
+            echo "1. [RECOMMENDED] Review and commit changes following your project's policies:" >&2
+            echo "   cd $repo_path" >&2
+            echo "   git status                    # Review what changed" >&2
+            echo "   # Update .gitignore if needed for files that shouldn't be tracked" >&2
+            echo "   git add <specific-files>      # Add only the files you intend to commit" >&2
+            echo "   git commit -m \"message\"       # Commit with descriptive message" >&2
+            echo "" >&2
+            echo "2. Manually stash your changes:" >&2
+            echo "   cd $repo_path" >&2
+            echo "   git stash push --include-untracked -m \"Description of changes\"" >&2
+            echo "   # Run the bridge script" >&2
+            echo "   # Then restore: git stash pop" >&2
+            echo "" >&2
+            echo "3. Use automatic stashing (USE WITH CAUTION):" >&2
+            echo "   Add --stash flag to your command:" >&2
+            echo "   $0 [mode] [args...] --stash" >&2
+            echo "" >&2
+            echo "   With --stash, ALL uncommitted and untracked changes will be" >&2
+            echo "   automatically stashed before the operation and restored afterward." >&2
+            echo "   This is convenient but bypasses your review of what's being stashed." >&2
+            echo "=======================================================" >&2
+            echo "" >&2
+            error_exit "Clean working directory required. Use one of the options above."
+        fi
+
+        # Auto-stash is enabled - proceed with automatic stashing
         echo "" >&2
         echo "=======================================================" >&2
-        echo "⚠️  WARNING: Repository '$repo_name' has uncommitted or untracked files" >&2
+        echo "⚠️  AUTO-STASH ENABLED: Repository '$repo_name' has uncommitted or untracked files" >&2
         echo "=======================================================" >&2
         echo "$git_status" >&2
         echo "" >&2
@@ -228,10 +281,15 @@ restore_stashed_changes() {
             echo "The stash remains in the list because conflicts prevented automatic merge." >&2
             echo "" >&2
             echo "To manually restore:" >&2
-            echo "  1. Resolve the conflicts shown above" >&2
-            echo "  2. Run 'git add <resolved-files>'" >&2
-            echo "  3. Run 'git stash drop stash@{$our_stash_index}' to remove the stash" >&2
-            echo "  OR run 'git reset --hard' and 'git stash apply stash@{$our_stash_index}' to retry" >&2
+            echo "  Option A - Resolve conflicts:" >&2
+            echo "    1. Resolve the conflicts shown above in your editor" >&2
+            echo "    2. Run 'git add <resolved-files>'" >&2
+            echo "    3. Run 'git stash drop stash@{$our_stash_index}' to remove the stash" >&2
+            echo "" >&2
+            echo "  Option B - Start over (CAUTION: discards conflict resolution):" >&2
+            echo "    1. Run 'git checkout -- .' to discard current conflict markers" >&2
+            echo "    2. Run 'git stash apply stash@{$our_stash_index}' to retry" >&2
+            echo "    3. Manually resolve conflicts if they occur again" >&2
         else
             echo "⚠️  WARNING: Could not auto-restore stash" >&2
             echo "" >&2
@@ -395,6 +453,8 @@ do_export() {
     local temp_work_dir="/tmp/git_bridge_export_$$"
     mkdir -p "$temp_work_dir/$TRANSFER_DIR" || error_exit "Failed to create temporary directory for patch generation."
 
+    echo "INFO: Temporary files will be created in: $temp_work_dir"
+
     # --- Core Transfer Logic ---
 
     echo -e "\n1. Generating $num_commits ordered patch and metadata files..."
@@ -485,6 +545,9 @@ do_export() {
     # 3. Return to original branch and clean up temp work directory
     echo -e "\n3. Cleaning up local workspace in REPO 1 Holder..."
     git checkout "$repo1_original_branch" || error_exit "Failed to return to original branch in REPO 1. Manual intervention needed."
+
+    # Only remove temp directory on success - if we got here, everything worked
+    echo "   Removing temporary directory: $temp_work_dir"
     rm -rf "$temp_work_dir"
 
     # 4. Restore any stashed changes in both repositories
@@ -675,8 +738,22 @@ do_import() {
 
     echo -e "\n✅ IMPORT SUCCESSFUL."
     echo "$applied_count commit(s) have been applied and committed to your current branch ($repo2_original_branch) with full metadata preserved."
-    echo "You can now push the current branch to the remote."
-    echo "Next: Run 'cleanup' on the originating machine (REPO 1) to remove the remote branch: $temp_branch"
+    echo ""
+    echo "NEXT STEPS:"
+    echo ""
+    echo "1. [OPTIONAL] Review the imported commits:"
+    echo "   git log -${applied_count}    # Review what was just imported"
+    echo "   git diff HEAD~${applied_count}    # See all changes"
+    echo ""
+    echo "2. Push to your remote (when ready):"
+    echo "   git push origin $repo2_original_branch"
+    echo "   # Or if this is a new branch:"
+    echo "   # git push -u origin $repo2_original_branch"
+    echo ""
+    echo "3. Clean up the bridge branch on the export machine:"
+    echo "   (Run this command on the machine where you did the export)"
+    echo "   $0 cleanup <BRIDGE_REPO> $temp_branch"
+    echo ""
 }
 
 # ==============================================================================
@@ -716,19 +793,35 @@ do_cleanup() {
 # Main Script Logic
 # ==============================================================================
 
-# Parse arguments - detect auto-mode vs manual mode
-if [[ "$1" == "export" ]] || [[ "$1" == "import" ]] || [[ "$1" == "cleanup" ]]; then
+# Parse flags from all arguments
+for arg in "$@"; do
+    case "$arg" in
+        --stash)
+            ENABLE_AUTO_STASH=true
+            ;;
+    esac
+done
+
+# Parse arguments - detect auto-mode vs manual mode (filter out flags)
+args=()
+for arg in "$@"; do
+    if [[ "$arg" != --* ]]; then
+        args+=("$arg")
+    fi
+done
+
+if [[ "${args[0]}" == "export" ]] || [[ "${args[0]}" == "import" ]] || [[ "${args[0]}" == "cleanup" ]]; then
     # Manual mode: explicit mode specified
-    MODE="$1"
-    REPO_PATH_1="$2"
-    REPO_PATH_2_OR_BRANCH_NAME="$3"
-    N_COMMITS="$4"
+    MODE="${args[0]}"
+    REPO_PATH_1="${args[1]}"
+    REPO_PATH_2_OR_BRANCH_NAME="${args[2]}"
+    N_COMMITS="${args[3]}"
 else
     # Auto mode: first arg is a path, detect mode automatically
     MODE="auto"
-    REPO_PATH_1="$1"
-    REPO_PATH_2_OR_BRANCH_NAME="$2"
-    N_COMMITS="$3"
+    REPO_PATH_1="${args[0]}"
+    REPO_PATH_2_OR_BRANCH_NAME="${args[1]}"
+    N_COMMITS="${args[2]}"
 fi
 
 # Display help if arguments are missing or --help is used
@@ -780,6 +873,21 @@ if [ -z "$1" ] || [ "$1" == "--help" ]; then
     echo "   Action: Deletes temporary branch from remote and local"
     echo "   Usage: $0 cleanup <HOLDER_REPO> <TEMP_BRANCH_NAME>"
     echo "   Example: $0 cleanup ~/bridge ${TEMP_BRANCH_BASE}/main-${RANDOM_SUFFIX}"
+    echo ""
+    echo "========== OPTIONS ==========="
+    echo ""
+    echo "--stash        Enable automatic stashing of uncommitted/untracked files"
+    echo "               (USE WITH CAUTION)"
+    echo ""
+    echo "               By default, the script requires clean working directories"
+    echo "               for safety. Use this flag to automatically stash changes"
+    echo "               before operations and restore them afterward."
+    echo ""
+    echo "               Example: $0 export ~/app ~/bridge 3 --stash"
+    echo "               Example: $0 ~/bridge ~/app --stash"
+    echo ""
+    echo "               IMPORTANT: Without --stash, you'll receive clear error"
+    echo "               messages with three options if uncommitted files exist."
     echo "======================================================="
     exit 0
 fi
