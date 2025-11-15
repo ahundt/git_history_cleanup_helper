@@ -221,18 +221,21 @@ rewrite_history() {
     fi
     
     # Use git-filter-repo to rewrite history
-    local filter_cmd="
-if email == b'${OLD_EMAIL}':
-    name = b'${CORRECT_NAME}'
-    email = b'${CORRECT_EMAIL}'
-"
-    
     if ! git filter-repo --force --commit-callback "
-$filter_cmd
-commit.author_name = name if commit.author_email == b'${OLD_EMAIL}' else commit.author_name
-commit.author_email = email if commit.author_email == b'${OLD_EMAIL}' else commit.author_email
-commit.committer_name = name if commit.committer_email == b'${OLD_EMAIL}' else commit.committer_name  
-commit.committer_email = email if commit.committer_email == b'${OLD_EMAIL}' else commit.committer_email
+# Define the correct name and email as bytes
+correct_name = b'${CORRECT_NAME}'
+correct_email = b'${CORRECT_EMAIL}'
+old_email = b'${OLD_EMAIL}'
+
+# Update author fields if they match the old email
+if commit.author_email == old_email:
+    commit.author_name = correct_name
+    commit.author_email = correct_email
+
+# Update committer fields if they match the old email
+if commit.committer_email == old_email:
+    commit.committer_name = correct_name
+    commit.committer_email = correct_email
 "; then
         print_warning "❌ History rewrite failed. Restoring from backup..."
         git reset --hard "$backup_tag"
