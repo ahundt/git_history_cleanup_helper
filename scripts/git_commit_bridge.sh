@@ -202,16 +202,25 @@ do_export() {
 
         # Generate the Metadata File (.json) - Naming format: 001_commit_SHA.json
         local json_filename="${index_str}_${TRANSFER_FILE_PREFIX}_${short_sha}.json"
-        local metadata=$(git log -1 --pretty=format:'{
-            "sha": "%H",
-            "author_name": "%an",
-            "author_email": "%ae",
-            "date_full": "%aI",
-            "commit_subject": "%s",
-            "commit_body": "%b"
-        }' "$commit_sha")
 
-        echo "$metadata" | jq '.' > "$temp_work_dir/$TRANSFER_DIR/$json_filename" || error_exit "Failed to generate metadata for SHA $short_sha."
+        # Extract commit metadata using git log, then properly encode as JSON using jq
+        local commit_sha_full=$(git log -1 --pretty=format:'%H' "$commit_sha")
+        local author_name=$(git log -1 --pretty=format:'%an' "$commit_sha")
+        local author_email=$(git log -1 --pretty=format:'%ae' "$commit_sha")
+        local date_full=$(git log -1 --pretty=format:'%aI' "$commit_sha")
+        local commit_subject=$(git log -1 --pretty=format:'%s' "$commit_sha")
+        local commit_body=$(git log -1 --pretty=format:'%b' "$commit_sha")
+
+        # Use jq to properly encode all values as JSON (handles special characters and escaping)
+        jq -n \
+            --arg sha "$commit_sha_full" \
+            --arg author_name "$author_name" \
+            --arg author_email "$author_email" \
+            --arg date_full "$date_full" \
+            --arg commit_subject "$commit_subject" \
+            --arg commit_body "$commit_body" \
+            '{sha: $sha, author_name: $author_name, author_email: $author_email, date_full: $date_full, commit_subject: $commit_subject, commit_body: $commit_body}' \
+            > "$temp_work_dir/$TRANSFER_DIR/$json_filename" || error_exit "Failed to generate metadata for SHA $short_sha."
 
         total_generated=$((total_generated + 1))
         commit_index=$((commit_index + 1)) # Increment index
