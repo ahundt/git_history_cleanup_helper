@@ -290,21 +290,24 @@ do_import() {
             temp_branch=$(echo "$bridge_branches" | head -1)
             echo "INFO: Found 1 bridge branch: $temp_branch" >&2
         else
-            echo "INFO: Found $branch_count bridge branches:" >&2
-            echo "$bridge_branches" | nl >&2
+            # Multiple branches found - print options and exit with instructions
             echo "" >&2
-            read -p "Enter number to select (or press Enter for most recent): " selection >&2
-
-            if [ -z "$selection" ]; then
-                temp_branch=$(echo "$bridge_branches" | tail -1)
-            else
-                temp_branch=$(echo "$bridge_branches" | sed -n "${selection}p")
-            fi
-
-            if [ -z "$temp_branch" ]; then
-                error_exit "Invalid selection"
-            fi
-            echo "Selected: $temp_branch" >&2
+            echo "=======================================================" >&2
+            echo "INFO: Found $branch_count bridge branches:" >&2
+            echo "=======================================================" >&2
+            local branch_index=1
+            while IFS= read -r branch; do
+                echo "  $branch_index) $branch" >&2
+                branch_index=$((branch_index + 1))
+            done <<< "$bridge_branches"
+            echo "" >&2
+            echo "Please re-run with explicit branch selection using one of:" >&2
+            echo "" >&2
+            while IFS= read -r branch; do
+                echo "  $0 import $repo2_dest_path $branch" >&2
+            done <<< "$bridge_branches"
+            echo "=======================================================" >&2
+            exit 0
         fi
     fi
 
@@ -485,7 +488,7 @@ if [ -z "$1" ] || [ "$1" == "--help" ]; then
     echo "  Example: $0 ~/my-app ~/cli-bridge 5"
     echo ""
     echo "Machine 2 (IMPORT): $0 <BRIDGE_REPO> <DEST_REPO>"
-    echo "  - Auto-finds bridge branch (prompts if multiple exist)"
+    echo "  - Auto-finds bridge branch (exits with options if multiple exist)"
     echo "  - Applies patches to destination repo"
     echo "  Example: $0 ~/cli-bridge ~/my-app"
     echo ""
