@@ -24,7 +24,32 @@ This shell script removes files from your Git history using [git-filter-repo](ht
 
 **Built on git-filter-repo:** This tool is a wrapper around the excellent [git-filter-repo](https://github.com/newren/git-filter-repo) project by Elijah Newren. All the core history rewriting functionality comes from git-filter-repo - this script adds workflow automation, safety checks, and GitHub integration around it.
 
-## 🔧 Key Features
+## 📦 Repository Contents
+
+This repository contains three git history rewriting tools and a test suite:
+
+1. **`cleanup_git_history.sh`** - Removes files from git history (documented below)
+   - Use case: Remove secrets, large files, or unwanted data from commit history
+   - Requires: git-filter-repo 2.47+, optionally GitHub CLI
+
+2. **`commit_author_fix_git_history.sh`** - Rewrites commit author/committer attribution
+   - Use case: Fix incorrect author emails/names in commits (e.g., replace AI-generated attribution with human author)
+   - Requires: git-filter-repo, optionally gpg (for commit signing) and GitHub CLI (for uploading GPG keys)
+   - See: [Author Rewriting Tool](#author-rewriting-tool) section below
+
+3. **`git_commit_bridge.sh`** - Transfers commits between unrelated repositories via patch files
+   - Use case: Move commits when repositories have no common history or direct push is blocked
+   - Requires: jq
+   - See: [Git Commit Bridge](#git-commit-bridge) section below
+
+4. **`test_cleanup_git_history.sh`** - Test suite for cleanup_git_history.sh
+
+**⚠️ WARNING:**
+- `cleanup_git_history.sh` and `commit_author_fix_git_history.sh` rewrite git history, creating new commit hashes and breaking existing clones
+- `git_commit_bridge.sh` creates new commits in destination (does not modify source history)
+- Read documentation carefully before use
+
+## 🔧 Key Features (File Removal Tool)
 
 - 🛡️ **Safety-first design** - Defaults to dry-run mode with detailed file listings for preview
 - ✅ **Built-in verification** - Confirms file removal after cleanup operations
@@ -435,6 +460,207 @@ The test script includes:
 - **Backup and log creation** - Verifies proper backup and logging functionality
 - **Cross-platform compatibility** - Tests on different operating systems
 - **Safety validation** - Ensures no destructive operations during testing
+
+## Author Rewriting Tool
+
+**Script:** `commit_author_fix_git_history.sh`
+
+### What It Does
+
+Rewrites author and committer fields in commits matching a specified email address. Author is who wrote the changes, committer is who applied them to the repository.
+
+**Example use case:** Replace `Claude <noreply@anthropic.com>` with `Andrew Hundt <your@email.com>` in commits matching that email.
+
+**⚠️ Critical warnings:**
+- Creates new commit hashes for ALL commits (like changing `a1b2c3d` to `x9y8z7w`)
+- Breaks existing clones - collaborators must delete and re-clone
+- Destroys open pull requests (PRs reference old commit hashes that no longer exist)
+- Requires `git push --force` if repository was already pushed to remote
+- Backup tag is the ONLY way to undo - test in a copy first if unsure
+
+### How It Works
+
+Uses git-filter-repo's Python callback to rewrite commit metadata:
+1. Creates a backup tag before making changes
+2. Runs git-filter-repo with a Python script that updates author/committer fields
+3. Prompts for confirmation before rewriting and before pushing
+4. Optionally sets up GPG commit signing for future commits
+
+**⚠️ Critical:** git-filter-repo removes the origin remote as a safety measure. The script re-adds it, but you must manually restore branch tracking with `git branch --set-upstream-to=origin/main main`.
+
+### Usage
+
+```bash
+# Basic usage - rewrite author attribution
+./commit_author_fix_git_history.sh \
+  --name "Your Name" \
+  --email "your@email.com" \
+  --old-email "old@email.com"
+
+# With GPG signing setup
+./commit_author_fix_git_history.sh \
+  --name "Your Name" \
+  --email "your@email.com" \
+  --old-email "old@email.com" \
+  --setup-signing
+
+# Non-interactive mode (skips confirmation prompts)
+./commit_author_fix_git_history.sh \
+  --name "Your Name" \
+  --email "your@email.com" \
+  --old-email "old@email.com" \
+  --non-interactive
+```
+
+### Requirements
+
+- **Required:** git-filter-repo
+- **Optional:** gpg (for commit signing), GitHub CLI (for uploading GPG keys to GitHub)
+
+### Safety Features
+
+- Creates backup tag before rewriting (e.g., `backup-20251115-180319`)
+- Requires typing "REWRITE" to confirm history rewrite
+- Requires typing "PUSH" to confirm force-push to remote
+- Validates email format before processing
+- Restores from backup tag if git-filter-repo fails
+
+### Known Issues
+
+1. **Branch tracking lost:** After running, `git push` won't work until you restore tracking with:
+   ```bash
+   git branch --set-upstream-to=origin/main main
+   ```
+
+2. **Special characters in names:** Names containing single quotes (e.g., `O'Brien`) cause Python syntax errors.
+
+### When to Use This Tool
+
+**Use when:**
+- Fixing incorrect attribution (e.g., placeholder/AI emails in commit history)
+- Claiming proper credit for your contributions
+- Repository hasn't been pushed yet (simpler workflow)
+
+**Don't use if:**
+- Repository is actively used by multiple developers (coordinate first)
+- Open pull requests exist that you need to preserve
+- Unsure about which commits to change (test in a repository copy first)
+
+**📖 For implementation details, read the script code directly.** The Python callback is at lines 224-239 in `commit_author_fix_git_history.sh`.
+
+---
+
+## Git Commit Bridge
+
+**Script:** `git_commit_bridge.sh`
+
+### What It Does
+
+Transfers commits between repositories by converting them to patch files. Works when:
+- Repositories have no common history (unrelated)
+- Direct push is blocked
+- Moving commits via an intermediary repository
+
+**Technical approach:** Exports commits as numbered `.patch` files with corresponding `.json` metadata files, commits them to a temporary branch in an intermediary repository, then imports and re-applies them with preserved author/date/message information.
+
+### Modes
+
+1. **EXPORT:** Generate patch files from last N commits and commit to bridge repository
+2. **IMPORT:** Fetch and apply patches from bridge repository
+3. **CLEANUP:** Delete temporary bridge branch
+
+### Usage
+
+```bash
+# AUTO MODE - Automatically detects whether to export or import
+# Export example (source has commits to transfer)
+./git_commit_bridge.sh ~/source-repo ~/bridge-repo
+
+# Import example (bridge has patches to apply)
+./git_commit_bridge.sh ~/bridge-repo ~/destination-repo
+
+# MANUAL MODE - Explicit control
+# Export last 3 commits
+./git_commit_bridge.sh export ~/source-repo ~/bridge-repo 3
+
+# Import from specific branch
+./git_commit_bridge.sh import ~/bridge-repo ~/dest-repo claude/main-01WqaAvCxRr6eWW2Wu33e8xP
+
+# Cleanup after import
+./git_commit_bridge.sh cleanup ~/bridge-repo claude/main-01WqaAvCxRr6eWW2Wu33e8xP
+
+# With automatic stashing (use with caution)
+./git_commit_bridge.sh ~/source-repo ~/bridge-repo --stash
+```
+
+### Requirements
+
+- **jq** - required for parsing commit metadata
+- Write access to bridge repository
+
+### How It Works
+
+**Export process:**
+1. Generates `.patch` files (binary-safe) for each commit using `git show`
+2. Creates `.json` metadata files with author, email, date, and message
+3. Files are numbered chronologically (001, 002, 003...)
+4. Commits all files to a unique temporary branch in bridge repository
+5. You manually push the branch: `git push origin <branch-name>`
+
+**Import process:**
+1. Fetches the bridge branch
+2. Sorts patches by numerical prefix
+3. Applies patches sequentially with `git apply`
+4. Re-commits with original author/committer/date metadata preserved
+5. Removes transfer files and temporary branch
+
+**File format:**
+- Patches: `001_commit_abc1234.patch`, `002_commit_def5678.patch`
+- Metadata: `001_commit_abc1234.json`, `002_commit_def5678.json`
+- Stored in: `.bridge-transfer/` directory
+
+### Safety Features
+
+- **Auto-stashing:** Optional `--stash` flag to handle uncommitted changes (disabled by default)
+- **Unique branch names:** Uses random suffix to prevent conflicts (`claude/main-01WqaAvCxRr6eWW2Wu33e8xP`)
+- **Metadata preservation:** Maintains exact author, date, and commit message
+- **Orphaned stash detection:** Warns about leftover stashes from previous failed runs
+- **Error recovery guidance:** Provides exact commands to restore stashed changes if script fails
+
+### Limitations
+
+- Does not transfer git tags or references
+- Requires manual push after export
+- Cannot handle merge commits (linearizes history)
+- Bridge repository must have a remote configured
+- Creates new commit hashes in destination (not same as source)
+- **Committer becomes import runner** - only author/date preserved from source
+- Patch conflicts fail import if destination has conflicting changes
+- GPG signatures not preserved
+
+### Security Note
+
+Bridge repository temporarily contains your commit messages and code changes. Use a private repository or delete the bridge branch after import completes.
+
+### When to Use This Tool
+
+**Use when:**
+- Repositories have no common history and cannot be directly merged
+- Network restrictions block direct SSH/HTTPS push between repositories
+- You need to review commits before applying them (inspect .patch files)
+- Working across air-gapped networks
+
+**Don't use if:**
+- Repositories share common history (use `git remote add` and `git push` instead)
+- You need to preserve commit SHAs (this creates new hashes)
+- Merge commits must be preserved (this linearizes history)
+- You need to transfer git tags or branches (only transfers commits)
+
+**Trade-off:** Preserves author and dates but committer becomes whoever runs import.
+
+**📖 For implementation details, read the script code directly.** Core transfer logic is in the `do_export()` and `do_import()` functions in `git_commit_bridge.sh`.
+
+---
 
 ## Documentation and References
 
