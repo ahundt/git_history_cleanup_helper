@@ -3,20 +3,35 @@
 # ==============================================================================
 # Git Commit Bridge Script (Patch File Transfer)
 #
-# Purpose: Transfers commits between machines when only one repository can push/pull
-#          to the server (workaround for single-repo access restrictions).
+# Purpose: Transfers commits between machines when only one repository has push/pull
+#          access to the server (workaround for single-repo access restrictions).
 #
-# CORRECT Workflow Example:
+# Why This Exists:
+#   Some development environments (e.g., web-based IDEs, restricted networks) only
+#   allow push/pull to ONE specific repository. When developing across multiple
+#   local repositories that need to stay in sync, you cannot directly push commits
+#   between them. This script uses a "carrier" repository (the one with server access)
+#   to transport commit patches between machines, enabling development on restricted
+#   Machine 1 and deployment from unrestricted Machine 2.
 #
-#   Machine 1 (restricted - can ONLY push to carrier-repo):
-#     1. Develop in my-project (your project - CANNOT push to server)
-#     2. EXPORT: my-project → carrier-repo (commits converted to .patch files)
-#     3. PUSH carrier-repo to server (the ONE repo Machine 1 can push)
+# CORRECT Workflow (Step-by-Step):
 #
-#   Machine 2 (unrestricted - can push to any server):
-#     4. PULL carrier-repo from server (downloads the .patch files)
-#     5. IMPORT: carrier-repo → my-project (recreates commits from patches)
-#     6. PUSH my-project to project server (SUCCESS!)
+#   Machine 1 → my-project → carrier-repo (patches committed as files) → push to remote
+#
+#   Machine 2 → git pull carrier-repo (patches now on Machine 2) →
+#               bridge script import carrier-repo patches into my-project →
+#               git push my-project to project server → SUCCESS!
+#
+# Detailed Steps:
+#   Machine 1 (restricted - can ONLY push carrier-repo):
+#     1. Develop in my-project (CANNOT push to server)
+#     2. EXPORT: my-project → carrier-repo as .patch files
+#     3. PUSH carrier-repo to remote server
+#
+#   Machine 2 (unrestricted - can push any repo):
+#     4. PULL carrier-repo from remote
+#     5. IMPORT: carrier-repo patches → my-project
+#     6. PUSH my-project to project server
 #
 # Key Understanding:
 #   - my-project and carrier-repo are DIFFERENT projects (no shared commit history)
@@ -811,6 +826,14 @@ do_import() {
         commit_body=$(jq -r '.commit_body' "$json_file")
         local parent_sha
         parent_sha=$(jq -r '.parent_sha' "$json_file")
+        local commit_sha_full
+        commit_sha_full=$(jq -r '.sha' "$json_file")
+
+        # Check if this commit already exists in destination (skip if so)
+        if git cat-file -e "$commit_sha_full" 2>/dev/null; then
+            echo "   ⏭️  Skipping patch $applied_count - commit $short_sha already exists in destination"
+            continue
+        fi
 
         # Validate critical metadata was extracted successfully
         if [[ -z "$author_name" || "$author_name" == "null" ]]; then
