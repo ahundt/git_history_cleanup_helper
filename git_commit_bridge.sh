@@ -591,24 +591,34 @@ do_export() {
         author_name=$(git log -1 --pretty=format:'%an' "$commit_sha")
         local author_email
         author_email=$(git log -1 --pretty=format:'%ae' "$commit_sha")
-        local date_full
-        date_full=$(git log -1 --pretty=format:'%aI' "$commit_sha")
+        local author_date
+        author_date=$(git log -1 --pretty=format:'%aI' "$commit_sha")
+        local committer_name
+        committer_name=$(git log -1 --pretty=format:'%cn' "$commit_sha")
+        local committer_email
+        committer_email=$(git log -1 --pretty=format:'%ce' "$commit_sha")
+        local committer_date
+        committer_date=$(git log -1 --pretty=format:'%cI' "$commit_sha")
         local commit_subject
         commit_subject=$(git log -1 --pretty=format:'%s' "$commit_sha")
         local commit_body
         commit_body=$(git log -1 --pretty=format:'%b' "$commit_sha")
 
         # Use jq to properly encode all values as JSON (handles special characters and escaping)
-        # Include parent_sha for import validation
+        # ENHANCEMENT: Include both author and committer metadata for full fidelity
+        # This allows import to preserve exact SHAs when committer != author
         jq -n \
             --arg sha "$commit_sha_full" \
             --arg parent_sha "${parent_sha:-}" \
             --arg author_name "$author_name" \
             --arg author_email "$author_email" \
-            --arg date_full "$date_full" \
+            --arg author_date "$author_date" \
+            --arg committer_name "$committer_name" \
+            --arg committer_email "$committer_email" \
+            --arg committer_date "$committer_date" \
             --arg commit_subject "$commit_subject" \
             --arg commit_body "$commit_body" \
-            '{sha: $sha, parent_sha: $parent_sha, author_name: $author_name, author_email: $author_email, date_full: $date_full, commit_subject: $commit_subject, commit_body: $commit_body}' \
+            '{sha: $sha, parent_sha: $parent_sha, author_name: $author_name, author_email: $author_email, author_date: $author_date, committer_name: $committer_name, committer_email: $committer_email, committer_date: $committer_date, commit_subject: $commit_subject, commit_body: $commit_body}' \
             > "$temp_work_dir/$TRANSFER_DIR/$json_filename" || error_exit "Failed to generate metadata for SHA $short_sha."
 
         total_generated=$((total_generated + 1))
@@ -762,22 +772,32 @@ do_import() {
     echo -e "\n1. Fetching patches from carrier repository..."
     git fetch "$repo1_bridge_path" "$temp_branch" || error_exit "Failed to fetch branch '$temp_branch' from carrier repo. Check repo path and branch name."
 
-    # 2. Check out the transfer files into a temporary local branch IN PROJECT REPO
-    # NOTE: Temp branch will be deleted after import - commits go to repo2_original_branch
-    local local_temp_branch="local-bridge-$$"
-    echo "2. Creating temporary branch in project repo to extract patch files..."
-    git checkout -b "$local_temp_branch" FETCH_HEAD --no-track || error_exit "Failed to checkout transfer files."
+    # 2. Extract patch files from FETCH_HEAD to a temporary directory
+    # CRITICAL FIX: Do NOT checkout FETCH_HEAD as it only contains .bridge-transfer/ directory
+    # with no source files. Instead, extract patches to temp dir and stay on working branch.
+    local temp_patch_dir
+    temp_patch_dir=$(mktemp -d) || error_exit "Failed to create temporary directory for patches."
 
-    if [ ! -d "$TRANSFER_DIR" ]; then
-        error_exit "Transfer directory '$TRANSFER_DIR' not found in the fetched branch."
+    echo "2. Extracting patch files from bridge branch to temporary directory..."
+
+    # Use git archive to extract .bridge-transfer/ from FETCH_HEAD without changing branches
+    git archive FETCH_HEAD "$TRANSFER_DIR" | tar -x -C "$temp_patch_dir" 2>/dev/null || \
+        error_exit "Failed to extract transfer files from bridge branch. Ensure branch contains $TRANSFER_DIR directory."
+
+    # Verify extraction succeeded
+    if [ ! -d "$temp_patch_dir/$TRANSFER_DIR" ]; then
+        rm -rf "$temp_patch_dir"
+        error_exit "Transfer directory '$TRANSFER_DIR' not found after extraction from bridge branch."
     fi
+
+    echo "   Patches extracted to: $temp_patch_dir"
 
     # 3. Sort patches by filename (which contains the chronological index) and apply sequentially
     echo -e "\n3. Sorting and applying patches sequentially..."
 
     # Use find to locate patch files and sort by the 001_, 002_ prefix for correct ordering
     local patch_files_sorted
-    patch_files_sorted=$(find "$TRANSFER_DIR" -maxdepth 1 -name '[0-9][0-9][0-9]_'"${TRANSFER_FILE_PREFIX}_"'*.patch' 2>/dev/null | sort)
+    patch_files_sorted=$(find "$temp_patch_dir/$TRANSFER_DIR" -maxdepth 1 -name '[0-9][0-9][0-9]_'"${TRANSFER_FILE_PREFIX}_"'*.patch' 2>/dev/null | sort)
     local num_patches=0
     local applied_count=0
 
@@ -818,8 +838,14 @@ do_import() {
         author_name=$(jq -r '.author_name' "$json_file")
         local author_email
         author_email=$(jq -r '.author_email' "$json_file")
-        local date_full
-        date_full=$(jq -r '.date_full' "$json_file")
+        local author_date
+        author_date=$(jq -r '(.author_date // .date_full)' "$json_file")  # Backward compatibility with old exports
+        local committer_name
+        committer_name=$(jq -r '(.committer_name // .author_name)' "$json_file")  # Fallback to author if not present
+        local committer_email
+        committer_email=$(jq -r '(.committer_email // .author_email)' "$json_file")  # Fallback to author if not present
+        local committer_date
+        committer_date=$(jq -r '(.committer_date // .date_full)' "$json_file")  # Backward compatibility
         local commit_subject
         commit_subject=$(jq -r '.commit_subject' "$json_file")
         local commit_body
@@ -842,8 +868,8 @@ do_import() {
         if [[ -z "$author_email" || "$author_email" == "null" ]]; then
             error_exit "Failed to extract author_email from $json_file"
         fi
-        if [[ -z "$date_full" || "$date_full" == "null" ]]; then
-            error_exit "Failed to extract date_full from $json_file"
+        if [[ -z "$author_date" || "$author_date" == "null" ]]; then
+            error_exit "Failed to extract author_date from $json_file"
         fi
         if [[ -z "$commit_subject" || "$commit_subject" == "null" ]]; then
             error_exit "Failed to extract commit_subject from $json_file"
@@ -897,32 +923,33 @@ do_import() {
         # Prepare commit
         git add .
 
-        # Preserve original author details and timestamp (Committer will be the user on Machine 2)
+        # Preserve original author and committer details for exact SHA preservation
+        # CRITICAL FIX: Use committer metadata from export to preserve exact commit SHAs
+        # Falls back to author if committer fields not present (backward compatibility)
         export GIT_AUTHOR_NAME="$author_name"
         export GIT_AUTHOR_EMAIL="$author_email"
-        export GIT_AUTHOR_DATE="$date_full"
-        export GIT_COMMITTER_DATE="$date_full"
+        export GIT_AUTHOR_DATE="$author_date"
+        export GIT_COMMITTER_NAME="$committer_name"      # FIX: Preserve committer name
+        export GIT_COMMITTER_EMAIL="$committer_email"    # FIX: Preserve committer email
+        export GIT_COMMITTER_DATE="$committer_date"
 
         local full_message="$commit_subject\n\n$commit_body"
 
         git commit -F <(echo -e "$full_message") || error_exit "Failed to create final commit for $short_sha. Are there changes to commit?"
 
         # Unset environment variables to prevent pollution across iterations
-        unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+        unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
     done
 
-    # 4. Final cleanup of transfer files and temporary branch
+    # 4. Final cleanup of temporary patch directory
     echo -e "\n4. Final cleanup..."
 
-    # Remove the transfer directory
-    rm -rf "$TRANSFER_DIR" || echo "Warning: Failed to remove transfer directory locally."
-
-    # Switch back to original branch
-    git checkout "$repo2_original_branch" || error_exit "Failed to return to original branch. Manual intervention needed."
-
-    # Delete temporary branch
-    git branch -D "$local_temp_branch" || error_exit "Failed to delete temporary local branch. Manual intervention needed."
+    # Remove the temporary patch directory
+    if [ -n "$temp_patch_dir" ] && [ -d "$temp_patch_dir" ]; then
+        rm -rf "$temp_patch_dir" || echo "Warning: Failed to remove temporary patch directory: $temp_patch_dir"
+        echo "   Removed temporary directory"
+    fi
 
     # Restore any stashed changes in the destination repository
     restore_stashed_changes "$repo2_dest_path"

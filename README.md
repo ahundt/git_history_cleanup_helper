@@ -611,17 +611,18 @@ Transfers commits between machines when only one repository can push/pull to the
 
 **Export process:**
 1. Generates `.patch` files (binary-safe) for each commit using `git show`
-2. Creates `.json` metadata files with author, email, date, and message
+2. Creates `.json` metadata files with author, committer, dates, and message
 3. Files are numbered chronologically (001, 002, 003...)
 4. Commits all files to a unique temporary branch in bridge repository
 5. You manually push the branch: `git push origin <branch-name>`
 
 **Import process:**
 1. Fetches the bridge branch
-2. Sorts patches by numerical prefix
-3. Applies patches sequentially with `git apply`
-4. Re-commits with original author/committer/date metadata preserved
-5. Removes transfer files and temporary branch
+2. Extracts `.bridge-transfer/` directory to temporary location (stays on destination branch)
+3. Sorts patches by numerical prefix
+4. Applies patches sequentially with `git apply`
+5. Re-commits with original author/committer/date metadata preserved
+6. Removes temporary patch directory
 
 **File format:**
 - Patches: `001_commit_abc1234.patch`, `002_commit_def5678.patch`
@@ -642,8 +643,8 @@ Transfers commits between machines when only one repository can push/pull to the
 - Requires manual push after export
 - Cannot handle merge commits (linearizes history)
 - Bridge repository must have a remote configured
-- Creates new commit hashes in destination (not same as source)
-- **Committer becomes import runner** - only author/date preserved from source
+- **Preserves exact commit SHAs** when author = committer (most common case)
+- Full author and committer metadata preserved from source
 - Patch conflicts fail import if destination has conflicting changes
 - GPG signatures not preserved
 
@@ -662,13 +663,13 @@ Bridge repository temporarily contains your commit messages and code changes. Us
 **Don't use if:**
 - All repositories have direct push/pull access (use normal `git push` instead)
 - Trying to transfer between completely different projects (repos must share commit history)
-- You need to preserve exact commit SHAs (this creates new hashes in destination)
 - Merge commits must be preserved (this linearizes history)
 
-**Trade-offs:**
-- Preserves author and dates but committer becomes whoever runs import
-- Creates new commit hashes in destination (not identical to source)
-- Repos must share history - parent commit of first patch must exist in destination
+**Important Notes:**
+- **SHA Preservation:** Exact commit SHAs are preserved when author = committer (typical case)
+- **Metadata Fidelity:** Full author and committer information transferred via JSON metadata
+- **Parent Validation:** Parent commit of first patch must exist in destination repository
+- **Backward Compatible:** Import works with both old exports (author only) and new exports (author + committer)
 
 **📖 For implementation details, read the script code directly.** Core transfer logic is in the `do_export()` and `do_import()` functions in `git_commit_bridge.sh`.
 
