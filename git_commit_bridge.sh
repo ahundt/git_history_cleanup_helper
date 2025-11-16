@@ -2,18 +2,31 @@
 
 # ==============================================================================
 # Git Commit Bridge Script (Patch File Transfer)
-# Purpose: Robustly transfers COMMITTED changes from an incompatible source
-#          repository (REPO_SRC) to a remote via an intermediary repository (REPO_HOLDER).
-#          Changes are moved as a sequence of uniquely named .patch files and metadata
-#          as .json files, preserving transfer order.
 #
-# Modes:
-# 1. EXPORT: Generates ordered patch/metadata files for the last N commits,
-#    commits these files to a unique temporary branch, and pushes that branch
-#    to the remote via REPO_HOLDER.
-# 2. IMPORT: Fetches the branch, sorts the patches by the chronological index
-#    prefix, applies them sequentially, and re-commits with preserved metadata.
-# 3. CLEANUP: Deletes the temporary branch both locally and remotely from REPO_HOLDER.
+# Purpose: Transfers commits between machines when only one repository can push/pull
+#          to the server (workaround for single-repo access restrictions).
+#
+# CORRECT Workflow Example:
+#
+#   Machine 1 (restricted - can ONLY push to carrier-repo):
+#     1. Develop in my-project (your project - CANNOT push to server)
+#     2. EXPORT: my-project → carrier-repo (commits converted to .patch files)
+#     3. PUSH carrier-repo to server (the ONE repo Machine 1 can push)
+#
+#   Machine 2 (unrestricted - can push to any server):
+#     4. PULL carrier-repo from server (downloads the .patch files)
+#     5. IMPORT: carrier-repo → my-project (recreates commits from patches)
+#     6. PUSH my-project to project server (SUCCESS!)
+#
+# Key Understanding:
+#   - my-project and carrier-repo are DIFFERENT projects (no shared commit history)
+#   - carrier-repo is just a "messenger" - stores .patch files temporarily
+#   - parent_sha in JSON shows which my-project commit the patch came from
+#   - Validation checks if Machine 2's my-project has that parent commit
+#
+# Repository Roles:
+#   REPO1 = Carrier repository - can push/pull on Machine 1
+#   REPO2 = Project repository - your actual development code
 # ==============================================================================
 
 # --- Configuration ---
@@ -571,14 +584,16 @@ do_export() {
         commit_body=$(git log -1 --pretty=format:'%b' "$commit_sha")
 
         # Use jq to properly encode all values as JSON (handles special characters and escaping)
+        # Include parent_sha for import validation
         jq -n \
             --arg sha "$commit_sha_full" \
+            --arg parent_sha "${parent_sha:-}" \
             --arg author_name "$author_name" \
             --arg author_email "$author_email" \
             --arg date_full "$date_full" \
             --arg commit_subject "$commit_subject" \
             --arg commit_body "$commit_body" \
-            '{sha: $sha, author_name: $author_name, author_email: $author_email, date_full: $date_full, commit_subject: $commit_subject, commit_body: $commit_body}' \
+            '{sha: $sha, parent_sha: $parent_sha, author_name: $author_name, author_email: $author_email, date_full: $date_full, commit_subject: $commit_subject, commit_body: $commit_body}' \
             > "$temp_work_dir/$TRANSFER_DIR/$json_filename" || error_exit "Failed to generate metadata for SHA $short_sha."
 
         total_generated=$((total_generated + 1))
@@ -717,23 +732,25 @@ do_import() {
         error_exit "Bridge repository path '$repo1_bridge_path' is not a valid Git repository."
     fi
 
-    # Check REPO 2 (The DESTINATION repository)
+    # Check REPO 2 (The DESTINATION PROJECT repository - where commits will be recreated)
+    # This is my-project on Machine 2 (NOT the carrier repo)
     check_clean_working_directory "$repo2_dest_path" "import-destination"
     local repo2_original_branch
     repo2_original_branch=$(get_current_branch)
 
-    echo "INFO: Bridge path: $repo1_bridge_path"
-    echo "INFO: Destination path: $repo2_dest_path (Branch: $repo2_original_branch)"
+    echo "INFO: Carrier repository (messenger): $repo1_bridge_path"
+    echo "INFO: Project repository (destination): $repo2_dest_path (Branch: $repo2_original_branch)"
 
     cd "$repo2_dest_path" || error_exit "Could not change directory to $repo2_dest_path"
 
-    # 1. Fetch the bridge branch from the bridge repository
-    echo -e "\n1. Fetching temporary branch '$temp_branch' from bridge repository..."
-    git fetch "$repo1_bridge_path" "$temp_branch" || error_exit "Failed to fetch branch '$temp_branch' from bridge repo. Check repo path and branch name."
+    # 1. Fetch the bridge branch from the CARRIER repository (has the .patch files)
+    echo -e "\n1. Fetching patches from carrier repository..."
+    git fetch "$repo1_bridge_path" "$temp_branch" || error_exit "Failed to fetch branch '$temp_branch' from carrier repo. Check repo path and branch name."
 
-    # 2. Check out the transfer files into a temporary local branch
+    # 2. Check out the transfer files into a temporary local branch IN PROJECT REPO
+    # NOTE: Temp branch will be deleted after import - commits go to repo2_original_branch
     local local_temp_branch="local-bridge-$$"
-    echo "2. Creating local branch '$local_temp_branch' to stage files..."
+    echo "2. Creating temporary branch in project repo to extract patch files..."
     git checkout -b "$local_temp_branch" FETCH_HEAD --no-track || error_exit "Failed to checkout transfer files."
 
     if [ ! -d "$TRANSFER_DIR" ]; then
@@ -781,11 +798,7 @@ do_import() {
         applied_count=$((applied_count + 1))
         echo -e "\n--- Applying and committing patch $applied_count of $num_patches: SHA $short_sha ---"
 
-        # Apply the patch
-        git apply --check --whitespace=fix "$patch_file" || error_exit "Patch check failed for $short_sha. Resolve conflicts manually, then run 'git checkout -- $TRANSFER_DIR' to remove transfer files."
-        git apply --whitespace=fix "$patch_file" || error_exit "Failed to apply patch for $short_sha. Manual conflict resolution needed."
-
-        # Extract Metadata
+        # Extract Metadata first for validation
         local author_name
         author_name=$(jq -r '.author_name' "$json_file")
         local author_email
@@ -796,6 +809,8 @@ do_import() {
         commit_subject=$(jq -r '.commit_subject' "$json_file")
         local commit_body
         commit_body=$(jq -r '.commit_body' "$json_file")
+        local parent_sha
+        parent_sha=$(jq -r '.parent_sha' "$json_file")
 
         # Validate critical metadata was extracted successfully
         if [[ -z "$author_name" || "$author_name" == "null" ]]; then
@@ -810,6 +825,51 @@ do_import() {
         if [[ -z "$commit_subject" || "$commit_subject" == "null" ]]; then
             error_exit "Failed to extract commit_subject from $json_file"
         fi
+
+        # Validate parent commit exists in DESTINATION project repo (first patch only)
+        # NOTE: We're checking the PROJECT repo (my-project), NOT the carrier repo
+        # parent_sha is from the source PROJECT repo where patches were created
+        # Carrier repo (carrier-repo) doesn't matter - it's just a messenger
+        if [[ $applied_count -eq 1 && -n "$parent_sha" && "$parent_sha" != "null" && "$parent_sha" != "" ]]; then
+            # Check if parent commit exists in destination PROJECT repository
+            # This validation happens in repo2_dest_path (my-project on Machine 2)
+            if ! git cat-file -e "$parent_sha" 2>/dev/null; then
+                echo "" >&2
+                echo "=======================================================" >&2
+                echo "❌ ERROR: Project Repository Missing Parent Commit" >&2
+                echo "=======================================================" >&2
+                echo "First patch expects parent commit: $parent_sha" >&2
+                echo "This commit does not exist in destination project repository." >&2
+                echo "" >&2
+                echo "Patch details:" >&2
+                echo "  Subject: $commit_subject" >&2
+                echo "  Author: $author_name <$author_email>" >&2
+                echo "" >&2
+                echo "This usually means:" >&2
+                echo "  - Machine 2's project repo is older than Machine 1's" >&2
+                echo "  - Machine 2's project repo is on a different branch" >&2
+                echo "  - Patches came from a different project entirely" >&2
+                echo "" >&2
+                echo "To diagnose:" >&2
+                echo "  # Check what files the patch tries to modify:" >&2
+                echo "  grep '^diff --git' $patch_file | head" >&2
+                echo "" >&2
+                echo "  # See if those files exist in destination:" >&2
+                echo "  ls -la <file-paths-from-above>" >&2
+                echo "" >&2
+                echo "Destination project repository:" >&2
+                echo "  Path: $(pwd)" >&2
+                echo "  Branch: $repo2_original_branch" >&2
+                echo "" >&2
+                echo "Note: Carrier repository doesn't matter - only project repo is validated" >&2
+                echo "=======================================================" >&2
+                error_exit "Parent commit $parent_sha not found in destination project repository"
+            fi
+        fi
+
+        # Apply the patch
+        git apply --check --whitespace=fix "$patch_file" || error_exit "Patch check failed for $short_sha. Resolve conflicts manually, then run 'git checkout -- $TRANSFER_DIR' to remove transfer files."
+        git apply --whitespace=fix "$patch_file" || error_exit "Failed to apply patch for $short_sha. Manual conflict resolution needed."
 
         # Prepare commit
         git add .

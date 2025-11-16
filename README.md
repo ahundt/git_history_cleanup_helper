@@ -469,7 +469,7 @@ The test script includes:
 
 Rewrites author and committer fields in commits matching a specified email address. Author is who wrote the changes, committer is who applied them to the repository.
 
-**Example use case:** Replace `Claude <noreply@anthropic.com>` with `Andrew Hundt <your@email.com>` in commits matching that email.
+**Example use case:** Replace `old-computer <old-computer@example.com>` with `Your Name <you@example.com>` in commits matching that email.
 
 **⚠️ Critical warnings:**
 - Creates new commit hashes for ALL commits (like changing `a1b2c3d` to `x9y8z7w`)
@@ -556,47 +556,56 @@ Uses git-filter-repo's Python callback to rewrite commit metadata:
 
 ### What It Does
 
-Transfers commits between repositories by converting them to patch files. Works when:
-- Repositories have no common history (unrelated)
-- Direct push is blocked
-- Moving commits via an intermediary repository
+Transfers commits between machines when only one repository can push/pull to the server.
 
-**Technical approach:** Exports commits as numbered `.patch` files with corresponding `.json` metadata files, commits them to a temporary branch in an intermediary repository, then imports and re-applies them with preserved author/date/message information.
+**Example:**
+- **Machine 1**: my-project repo (CANNOT push to server) has new commits
+- **Carrier**: carrier-repo (CAN push/pull) - different project, just carries patches
+- **Machine 2**: my-project repo (CAN push to server) needs those commits
+
+**Workflow:**
+1. **Export (Machine 1)**: my-project → carrier-repo as .patch files
+2. **Push**: Push carrier-repo to server
+3. **Import (Machine 2)**: Pull carrier-repo → import patches to my-project
+4. **Push**: Push my-project to project server
+
+**Key:** carrier-repo is different project from my-project. Both my-project repos (Machine 1 & 2) are the same project at possibly different points in history.
 
 ### Modes
 
-1. **EXPORT:** Generate patch files from last N commits and commit to bridge repository
-2. **IMPORT:** Fetch and apply patches from bridge repository
-3. **CLEANUP:** Delete temporary bridge branch
+1. **EXPORT (Machine A):** Generate patch files from dev repo's last N commits, commit to bridge repo
+2. **IMPORT (Machine B):** Fetch patches from bridge repo, apply to dev repo
+3. **CLEANUP:** Delete temporary bridge branch after successful import
 
 ### Usage
 
 ```bash
-# AUTO MODE - Automatically detects whether to export or import
-# Export example (source has commits to transfer)
-./git_commit_bridge.sh ~/source-repo ~/bridge-repo
+# AUTO MODE - Automatically detects export vs import based on repo state
+# Export: First arg is dev repo (has commits), second is bridge repo
+./git_commit_bridge.sh ~/my-dev-repo ~/bridge-repo
 
-# Import example (bridge has patches to apply)
-./git_commit_bridge.sh ~/bridge-repo ~/destination-repo
+# Import: First arg is bridge repo (has patches), second is dev repo
+./git_commit_bridge.sh ~/bridge-repo ~/my-dev-repo
 
 # MANUAL MODE - Explicit control
-# Export last 3 commits
-./git_commit_bridge.sh export ~/source-repo ~/bridge-repo 3
+# Export last 3 commits from dev repo to bridge repo
+./git_commit_bridge.sh export ~/my-dev-repo ~/bridge-repo 3
 
-# Import from specific branch
-./git_commit_bridge.sh import ~/bridge-repo ~/dest-repo claude/main-01WqaAvCxRr6eWW2Wu33e8xP
+# Import from bridge repo to dev repo (specify branch if multiple exist)
+./git_commit_bridge.sh import ~/bridge-repo ~/my-dev-repo claude/main-01WqaAvCxRr6eWW2Wu33e8xP
 
-# Cleanup after import
+# Cleanup temporary branch from bridge repo
 ./git_commit_bridge.sh cleanup ~/bridge-repo claude/main-01WqaAvCxRr6eWW2Wu33e8xP
 
 # With automatic stashing (use with caution)
-./git_commit_bridge.sh ~/source-repo ~/bridge-repo --stash
+./git_commit_bridge.sh ~/my-dev-repo ~/bridge-repo --stash
 ```
 
 ### Requirements
 
 - **jq** - required for parsing commit metadata
 - Write access to bridge repository
+- **Both dev repos must be the same project on different machines** - patches apply on top of shared commit history to bring repos to parity (parent commit of first patch must exist in destination)
 
 ### How It Works
 
@@ -645,18 +654,21 @@ Bridge repository temporarily contains your commit messages and code changes. Us
 ### When to Use This Tool
 
 **Use when:**
-- Repositories have no common history and cannot be directly merged
-- Network restrictions block direct SSH/HTTPS push between repositories
+- Only one repository can push/pull to server (e.g., restricted development environment)
+- Developing same project on multiple machines that need to stay in sync
+- Network/environment restrictions prevent direct push between dev repos
 - You need to review commits before applying them (inspect .patch files)
-- Working across air-gapped networks
 
 **Don't use if:**
-- Repositories share common history (use `git remote add` and `git push` instead)
-- You need to preserve commit SHAs (this creates new hashes)
+- All repositories have direct push/pull access (use normal `git push` instead)
+- Trying to transfer between completely different projects (repos must share commit history)
+- You need to preserve exact commit SHAs (this creates new hashes in destination)
 - Merge commits must be preserved (this linearizes history)
-- You need to transfer git tags or branches (only transfers commits)
 
-**Trade-off:** Preserves author and dates but committer becomes whoever runs import.
+**Trade-offs:**
+- Preserves author and dates but committer becomes whoever runs import
+- Creates new commit hashes in destination (not identical to source)
+- Repos must share history - parent commit of first patch must exist in destination
 
 **📖 For implementation details, read the script code directly.** Core transfer logic is in the `do_export()` and `do_import()` functions in `git_commit_bridge.sh`.
 
