@@ -77,3 +77,7 @@ backup-*/
 dist/
 build/
 *.egg-info/
+
+# Archive directory (reference implementations and documentation)
+# Uncomment the line below to exclude archive from version control
+# archive/
